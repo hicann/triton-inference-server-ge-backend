@@ -5,7 +5,7 @@ input [
   {
     name: "image"
     data_type: TYPE_FP32
-    dims: [3, 224, 224  ]
+    dims: [3, 224, 224 ]
   }
 ]
 max_batch_size: 8
@@ -17,17 +17,14 @@ output [
   }
 ]
 
-instance_group [{ 
-  kind: KIND_CPU
+instance_group [{
   count: 4
 }
 ]
 
-
-
 parameters: [
 {
-  key: "DEVICEIDS",
+  key: "device_ids",
   value: {string_value: "4,5,6"}
 }
 ]
