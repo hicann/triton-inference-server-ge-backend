@@ -6,6 +6,7 @@ project(tutorialombackend LANGUAGES C CXX)
 set(ASCEND_DIR /usr/local/Ascend)
 set(ASCEND_PATH /usr/local/Ascend/ascend-toolkit/latest)
 set(ATC_INCLUDE_DIR ${ASCEND_PATH}/compiler/include)
+set(ONNXRUNTIME_ROOT /opt/onnxruntime)
 
 message("current arch: ${ARCH}")
 
@@ -15,6 +16,8 @@ option(TRITON_ENABLE_STATS "Include statistics collections in backend" ON)
 set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
 set(TRITON_CORE_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/core repo")
 set(TRITON_BACKEND_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/backend repo")
+# 需根据实际路径填写
+set(ONNXRUNTIME_ROOT ${ONNXRUNTIME_ROOT})
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -39,6 +42,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wl,--build-id=none")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-z,relro,-z,now")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pie -fexceptions")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftrapv -s")
+
 
 # add_definitions(-D_GLIBCXX_USE_C99=1)
 #
@@ -81,6 +85,10 @@ INCLUDE_DIRECTORIES(
 ${ASCEND_DIR}/ascend-toolkit/latest/${ARCH}-linux/include
 )
 
+# onnxruntime
+include_directories(${ONNXRUNTIME_ROOT}/include)
+link_directories(${ONNXRUNTIME_ROOT}/lib)
+
 file(GLOB_RECURSE SOURCE_FILES "${CMAKE_CURRENT_LIST_DIR}/src/*.cpp")
 add_library(triton-npu-ge-backend SHARED ${SOURCE_FILES})
 
@@ -122,6 +130,7 @@ PRIVATE
     fmk_onnx_parser
     fmk_parser
     ge_runner
+    onnxruntime
 )
 
 set_target_properties(

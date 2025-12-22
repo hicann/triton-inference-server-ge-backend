@@ -16,7 +16,12 @@
 #include <unordered_map>
 #include <cstdlib>
 #include <unistd.h>
-
+#include <tuple>
+#include <algorithm>
+#include <onnxruntime_cxx_api.h>
+#include <unordered_set>
+#include <vector>
+#include <string>
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_model_instance.h"
 #include "triton/backend/backend_model.h"
@@ -42,10 +47,36 @@ public:
 
     ModelState(TRITONBACKEND_Model *triton_model);
     enum class InferMode { DYNAMICMODEL, STATICMODEL };
-    struct ClientTensor {
+
+    enum class ModelMode {
+        MAX_BATCH,  // 自动加上batch维度 pbtxt中max_batch_size>0
+        MAX_BATCH_HAVE_UNKNOW_DIM,
+        NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE,  // max_batch_size==0 所有张量维度0一样且不是-1
+        NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM,  // max_batch_size==0 所有张量维度0一样且不是-1 其余维度包含-1(未知)
+        NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE,                  // max_batch_size==0 所有张量维度0一样且是-1
+        NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM,  // max_batch_size==0 所有张量维度0一样且是-1
+        NO_MAX_BATCH_FIRST_NOT_SAME,                           // max_batch_size==0 所有张量维度0不一样
+        TENSOR_ZERO
+    };
+    // 友元函数声明
+    friend std::ostream &operator<<(std::ostream &os, ModelState::ModelMode mode);
+
+    struct Express {
+        std::string expressName;                                  // 表达式
+        std::map<std::string, std::pair<size_t, size_t>> dimMap;  // 表达式中张量  第几张量第几维度索引
+    };
+
+    void SetModelMode();
+    ModelMode GetModelNode()
+    {
+        return model_mode_;
+    }
+
+    struct OnnxTensorInfo {
         std::string name_;
         size_t dtype_;
         std::vector<int64_t> dims_;
+        std::vector<std::string> dim_name_;
     };
     // 获取方法
     std::string GetModelPath()
@@ -102,11 +133,11 @@ public:
     {
         return output_count_;
     }
-    const std::vector<ClientTensor> &GetInputClientTensors() const
+    const std::vector<OnnxTensorInfo> &GetInputClientTensors() const
     {
         return input_client_tensor_;
     }
-    const std::vector<ClientTensor> &GetOutputClientTensors() const
+    const std::vector<OnnxTensorInfo> &GetOutputClientTensors() const
     {
         return output_client_tensor_;
     }
@@ -141,20 +172,38 @@ public:
     {
         ge_static_mode_ = mode;
     }
+
+    bool GetDynamicBatchSupport()
+    {
+        return can_dynamic_batching;
+    }
+    const auto &GetInToOutMap() const noexcept
+    {
+        return input_dim_map_output_dim;
+    }
     // 打印方法
     void PrintModelConfig();
-    void PrintClientTensors(const std::vector<ClientTensor> &tensors, const std::string &tensor_type);
+    void PrintClientTensors(const std::vector<OnnxTensorInfo> &tensors, const std::string &tensor_type);
+    struct DynamicBatching {
+        std::vector<int64_t> preferred_batch_sizes;
+        int64_t max_queue_delay_microseconds_;
+    };
+    DynamicBatching &GetDynamicmode()
+    {
+        return dynamic_batching_;
+    }
 
 private:
     // 私有辅助方法
     void ParseCmdlineConfig(const nlohmann::json &cmdline, const std::vector<std::string> &npu_ge_config);
     void SetDumpGraph(const std::string &path);
     void SetProfiling(const std::string &type, const std::string &path, const std::string &aic_metrics);
-    TRITONSERVER_Error *ParseTensorInfo(common::TritonJson::Value &tensor, ClientTensor &client_tensor, bool is_input);
+    TRITONSERVER_Error *ParseTensorInfo(common::TritonJson::Value &tensor, OnnxTensorInfo &client_tensor,
+                                        bool is_input);
     TRITONSERVER_Error *ParseInputTensors(common::TritonJson::Value &inputs);
     TRITONSERVER_Error *ParseOutputTensors(common::TritonJson::Value &outputs);
-
-    void PrintTensorInfo(const ClientTensor &tensor, const std::string &prefix);
+    TRITONSERVER_Error *ParseDynamicBatching();
+    void PrintTensorInfo(const OnnxTensorInfo &tensor, const std::string &prefix);
 
     void ProcessDeviceIdsConfig();
     void ProcessDeviceExecBlocksConfig();
@@ -190,15 +239,87 @@ private:
     std::unordered_map<std::string, std::string> process_config_map_;
     std::string model_name_;
 
-    size_t input_count_;
-    size_t output_count_;
     std::unordered_map<std::string, std::string> parameters_;
-    std::vector<ClientTensor> input_client_tensor_;
-    std::vector<ClientTensor> output_client_tensor_;
     InferMode infer_mode_ = InferMode::DYNAMICMODEL;
     bool ge_static_mode_ = false;
     bool enable_dump_data_ = false;
+    DynamicBatching dynamic_batching_;
+
+    void ParseOnnxInfo();
+    TRITONSERVER_Error *CheckConfigIO();
+    TRITONSERVER_Error *AutoCompleteConfig();
+    TRITONSERVER_Error *AutoCompleteIO(const char *key, const std::vector<OnnxTensorInfo> &io_infos);
+    TRITONSERVER_Error *AutoCompleteMaxBatch();
+    TRITONSERVER_Error *PreNegativeOne();
+
+    bool CheckDynamicBatch();
+
+    size_t input_count_;
+    size_t output_count_;
+    std::vector<OnnxTensorInfo> input_client_tensor_;  // 记录配置文件
+    std::vector<OnnxTensorInfo> output_client_tensor_;
+    TRITONSERVER_Error *CreateInputdimToOutputdim();
+    std::unordered_set<std::string> ExtractVariables(const std::string &expr);
+    std::string RemoveSpaces(const std::string &str);
+    bool IsValidVariableStart(char c);
+    bool IsValidVariableChar(char c);
+    TRITONSERVER_Error *FindOutputDim(std::unordered_set<std::string> &umap1, Express &ex);
+
+    size_t onnx_input_count_;
+    size_t onnx_output_count_;
+    std::vector<OnnxTensorInfo> input_onnx_tensor_;  // 记录模型读取
+    std::vector<OnnxTensorInfo> output_onnx_tensor_;
+    void LogInputDimMapOutputDim();
+    int GetFirstDimNum();
+    TRITONSERVER_Error *CompareInputOutput();
+    bool FindMapResult(std::string &name, std::tuple<size_t, size_t, std::string> &t1);
+    void GetnegativeOne(size_t index, std::vector<int64_t> &dims_);
+    bool ContainNegativeOneFromTensor(size_t index = 1);
+    TRITONSERVER_Error *CheckModelMode();
+    TRITONSERVER_Error *InputdimToOutputdimMap(ModelState **state);
+    std::vector<std::string> GetOnnxSymbolicDimension(const Ort::TypeInfo &type_info);
+    void AddDimName();
+    void AddNegativeOneInfo();
+    void ChangeOutputdim();
+    void CompareOnnxAndTxt();
+    std::string PrintModelMode(ModelState::ModelMode mode);
+    bool can_dynamic_batching = false;
+    template <typename T>
+    bool ContainNegativeOne(const std::vector<T> &output_tensors, size_t index)
+    {
+        bool flag = false;
+        for (size_t i = 0; i < output_tensors.size(); i++) {
+            auto out = output_tensors[i].dims_;
+            for (size_t j = index; j < out.size(); j++) {
+                if (out[j] == -1) {
+                    flag = true;
+                }
+            }
+        }
+        return flag;
+    }
+    std::map<std::pair<size_t, size_t>, Express> input_dim_map_output_dim;
+    std::vector<std::pair<size_t, size_t>> negativeOne;
+    ModelMode model_mode_ = ModelMode::TENSOR_ZERO;
 };
+
+template <typename T1, typename T2>
+void PrintVector(const std::vector<T1> &vec, const std::string &name, const std::vector<T2> &dimname)
+{
+    std::string message{"["};
+    for (auto &v : vec) {
+        message += std::to_string(v);
+        message += ", ";
+    }
+    message.erase(message.end() - 2, message.end());
+    message += "]\n";
+    for (auto &v : dimname) {
+        message += v;
+        message += ", ";
+    }
+    message.erase(message.end() - 2, message.end());
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (name + ": " + message).c_str());
+}
 
 }
 

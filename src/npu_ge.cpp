@@ -48,24 +48,6 @@ TRITONSERVER_Error *TRITONBACKEND_Initialize(TRITONBACKEND_Backend *backend)
     uint32_t api_version_major;
     uint32_t api_version_minor;
     RETURN_IF_ERROR(TRITONBACKEND_ApiVersion(&api_version_major, &api_version_minor));
-
-    LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("Triton TRITONBACKEND API version: ") +
-                                        std::to_string(api_version_major) + "." + std::to_string(api_version_minor))
-                                           .c_str());
-    LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("'") + name + "' TRITONBACKEND API version: " +
-                                        std::to_string(TRITONBACKEND_API_VERSION_MAJOR) + "." +
-                                        std::to_string(TRITONBACKEND_API_VERSION_MINOR))
-                                           .c_str());
-
-    if ((api_version_major != TRITONBACKEND_API_VERSION_MAJOR) ||
-        (api_version_minor < TRITONBACKEND_API_VERSION_MINOR)) {
-        return TRITONSERVER_ErrorNew(
-            TRITONSERVER_ERROR_UNSUPPORTED,
-            (std::string("Triton TRITONBACKEND API version: ") + std::to_string(api_version_major) + "." +
-             std::to_string(api_version_minor) + " does not support '" + name + "' TRITONBACKEND API version: " +
-             std::to_string(TRITONBACKEND_API_VERSION_MAJOR) + "." + std::to_string(TRITONBACKEND_API_VERSION_MINOR))
-                .c_str());
-    }
     return nullptr;
 }
 TRITONSERVER_Error *TRITONBACKEND_Finalize(TRITONBACKEND_Backend *backend)
@@ -119,9 +101,9 @@ TRITONSERVER_Error *TRITONBACKEND_ModelInstanceInitialize(TRITONBACKEND_ModelIns
     TRITONBACKEND_Model *model;
     RETURN_IF_ERROR(TRITONBACKEND_ModelInstanceModel(instance, &model));
 
-    void *vmodelstate;
-    RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodelstate));
-    ModelState *model_state = reinterpret_cast<ModelState *>(vmodelstate);
+    void *vmodel_state;
+    RETURN_IF_ERROR(TRITONBACKEND_ModelState(model, &vmodel_state));
+    ModelState *model_state = reinterpret_cast<ModelState *>(vmodel_state);
 
     // Create a ModelInstanceState object and associate it with the
     // TRITONBACKEND_ModelInstance.

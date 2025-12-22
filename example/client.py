@@ -4,7 +4,6 @@ import numpy as np
 import tritonclient.http as httpclient
 from tritonclient.utils import *
 
-
 model_name = "image"
 with httpclient.InferenceServerClient("localhost:8000") as client:
     model_input = np.random.rand(1, 3, 224, 224).astype(np.float32) 

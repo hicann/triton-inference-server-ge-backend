@@ -13,7 +13,7 @@
 #include <functional>
 #include <mutex>
 #include <condition_variable>
-
+#include <queue>
 #include "ge_error_codes.h"
 #include "ge_api_types.h"
 #include "ge_api.h"
@@ -100,6 +100,11 @@ public:
 
     // 获取空闲 instance - 自动更新状态和任务计数
     std::vector<Instance *> GetIdleInstances(aclrtContext now_context, int num, bool is_lb);
+    int batch_accu_ = 0;
+    std::vector<int> batch_result_;
+    std::queue<TRITONBACKEND_Request *> input_queue_;
+    mutable std::mutex input_mutex_;
+    std::condition_variable input_cv_;
 
 private:
     // 负载计算相关方法

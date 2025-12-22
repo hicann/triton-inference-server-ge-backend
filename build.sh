@@ -7,7 +7,7 @@ GTEST_VERSION="v1.15.2"
 DT_MODE="OFF"
 INCREMENTAL_COMPILATION="OFF"
 COMPUTER_ARCH=$(uname -m)
-
+ONNXRUNTIME_ROOT="/opt/onnxruntime"
 echo "COMPUTER_ARCH: ${COMPUTER_ARCH}"
 
 while getopts "dtev:p:" opt; do

@@ -32,6 +32,7 @@
 
 #include "model_state.h"
 #include "scheduler.h"
+#include "inference.h"
 
 using namespace ge;
 using json = nlohmann::json;
@@ -52,20 +53,12 @@ public:
 
     int Init();
 
-    // 工具方法
-    int GetValueByKey(size_t key) const;
-    ge::DataType TransToGeData(size_t key) const;
-
-    void FreeDevResources(std::vector<void *> indev_buffer_, std::vector<void *> outdev_buffer_);
-    void FreeHostResources(std::vector<void *> inhost_buffer_, std::vector<void *> outhost_buffer_);
-
     // 静态工具方法
     static std::string GetEnvVar(const std::string &name);
     static void LoadGeConfig(std::string &env_value, std::map<ge::AscendString, ge::AscendString> &configMap);
 
 private:
     // 初始化相关方法
-    void InitTypeMappings();
     int InitGEEnvironment();
     int InitDevices(std::vector<int> &dev_ids_);
     int InitGraphSession(int dev_id, int graph_id, aclrtContext context, std::mutex &mu, ge::Session *session_);
@@ -76,89 +69,16 @@ private:
     void CreateDeviceThreads(int dev_id, int dev_index, int device_exec_block, std::vector<std::thread> &threads,
                              std::mutex &mu);
     void JoinAllThreads(std::vector<std::thread> &threads);
-    void FreeResources();
-
-    // 请求处理相关方法
-    int ProcessSingleRequest(TRITONBACKEND_Request *request, std::vector<Scheduler::Instance *> instances);
-
-    void CalculateBatchDistribution(int batch_total, size_t instance_count, std::vector<int> &input_offset,
-                                    std::vector<int> &batch_result);
-
-    int ExtractInputInfo(TRITONBACKEND_Request *request, std::vector<void *> &inhost_buffer_,
-                         std::vector<int> &inhost_line_size_, int &batch_total, std::vector<int> &input_offset,
-                         std::vector<int> &batch_result, size_t instance_count);
-
-    int PrepareOutputBuffers(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
-                             std::vector<int> &outhost_line_size_, int batch_total);
-
-    void GetExecutionBatchParams(int batch, int &exec_batch, int &cycle_count);
-
-    int ProcessSingleInstance(Scheduler::Instance *instance, int instance_index, int instance_count,
-                              std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                              std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                              const std::vector<int> &input_offset, const std::vector<int> &batch_result,
-                              int &success_count, int &invalid_count);
-
-    int CheckInferenceResult(int success_count, int invalid_count, int total_instances);
-
-    int ExecuteInference(std::vector<Scheduler::Instance *> instances, std::vector<void *> &inhost_buffer_,
-                         std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                         std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
-                         const std::vector<int> &batch_result);
-
-    int ExecuteInferenceParallel(std::vector<Scheduler::Instance *> instances, std::vector<void *> &inhost_buffer_,
-                                 std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                                 std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
-                                 const std::vector<int> &batch_result);
-
-    int ExecuteSingleInference(Scheduler::Instance *instance, int instance_index, int instance_count,
-                               std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                               std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                               const std::vector<int> &input_offset, const std::vector<int> &batch_result);
-
-    int PrepareInputTensors(Scheduler::Instance *instance, std::vector<void *> &inhost_buffer_,
-                            std::vector<int> &inhost_line_size_, int exec_batch, int instance_index,
-                            std::vector<void *> &indev_buffer_, std::vector<gert::Tensor> &inputs);
-
-    int BuildInputTensor(size_t input_index, int exec_batch, void *dev_buffer, gert::Tensor &tensor);
-
-    int PrepareOutputTensors(std::vector<int> &outhost_line_size_, int exec_batch, std::vector<void *> &outdev_buffer_,
-                             std::vector<gert::Tensor> &outputs);
-
-    int BuildOutputTensor(size_t output_index, int exec_batch, void *out_dev_buffer, gert::Tensor &tensor);
-
-    int ExecuteInferenceCycle(Scheduler::Instance *instance, std::vector<void *> &inhost_buffer_,
-                              std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                              std::vector<int> &outhost_line_size_, std::vector<gert::Tensor> &inputs,
-                              std::vector<gert::Tensor> &outputs, int exec_batch, int cycle_count, int instance_index,
-                              const std::vector<int> &input_offset);
-
-    int ExecuteInference(Scheduler::Instance *instance, std::vector<gert::Tensor> &inputs,
-                         std::vector<gert::Tensor> &outputs);
-
-    int CopyOutputToHost(Scheduler::Instance *instance, std::vector<void *> &outhost_buffer_,
-                         std::vector<int> &outhost_line_size_, int batch, int batch_front, int instance_index,
-                         std::vector<gert::Tensor> &outputs);
-
-    int BuildResponse(TRITONBACKEND_Request *request, std::vector<void *> &outhost_buffer_,
-                      std::vector<int64_t> &outsize, int batch_total);
-
-    int BuildSingleOutput(TRITONBACKEND_Response *response, size_t output_index, void *outhost_buffer,
-                          int64_t buffer_size, int batch_total);
-
-    std::unique_ptr<int64_t[]> CreateOutputShape(size_t output_index, uint32_t &size, int batch_total);
-
     ModelState *model_state_;
     std::string model_config_path_;
     std::string model_path_;
     std::string acl_path_;
     int thread_id_ = -1;
-    std::map<size_t, size_t> size_by_type_;
-    std::map<size_t, ge::DataType> ge_data_trans_;
+
     std::atomic<bool> init_failed_{false};
     std::exception_ptr init_exception_{nullptr};
     std::mutex exception_mutex_;
-    ge::Session *session_;
+    Inference *inference_ = nullptr;
 };
 }
 
