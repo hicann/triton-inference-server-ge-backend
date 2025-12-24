@@ -14,8 +14,7 @@ namespace npu_ge {
 #define TYPE_16_BYTE 2
 #define TYPE_8_BYTE 1
 #define BYTE_PTR char *
-#define NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE 2
-#define NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM 3
+
 #define PRIORITY_HIGH 2
 #define PRIORITY_MID 1
 #define PRIORITY_LOW 0
@@ -156,101 +155,136 @@ int Inference::ExtractCombineInputInfo(int batch_total, std::vector<TRITONBACKEN
     // 计算每个请求的起始复制位置
     CalculateCombineBatchDistribution(input_offset, batch_result);
     // 能组合的情况 提前申请内存
-    if (model_state_->GetDynamicmode().preferred_batch_sizes.size() > 0 &&
-        model_state_->GetModelNode() == ModelState::ModelMode::MAX_BATCH && model_state_->GetInToOutMap().size() == 0) {
-        // 先申请总内存 这个时候的input_tensor_info_[j].tensor_dims_ 从配置文件中读 因为输入不存在未知批次
-        for (size_t i = 0; i < model_state_->GetInputCount(); i++) {
-            size_t sample_element_size =
-                GetValueByKey(model_state_->GetInputClientTensors()[i].dtype_);  // 单个元素大小
-            int64_t total_out_size = static_cast<int64_t>(sample_element_size);
-            int per_buffer_size = sample_element_size;
-            if (input_tensor_info_[i].tensor_dims_.size() == 0) {
-                LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                            (std::string("input_tensor_info_[i].tensor_dims_.size() is: empty")).c_str());
-                return RET_ERR;
-            }
-            vector<int64_t> &dims_in = input_tensor_info_[i].tensor_dims_;
-            total_out_size *= batch_total;
-            for (size_t k = 0; k < dims_in.size(); k++) {
-                total_out_size *= dims_in[k];
-                per_buffer_size *= dims_in[k];
-            }
-            void *inhost_buffer = nullptr;
-            acl_ret = aclrtMallocHost(&inhost_buffer, total_out_size);
-            if (acl_ret != ACL_SUCCESS) {
-                LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                            (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
-                return RET_ERR;
-            }
-            inhost_buffer_.push_back(inhost_buffer);
-            inhost_line_size_.push_back(per_buffer_size);
-        }
+    if (CanCombine(model_state_)) {
+        AllocateCombinedMemory(model_state_, inhost_buffer_, inhost_line_size_, batch_total);
     } else {
         // 多个请求无法合并 此时只处理一个请求
         // dims_in需要在解析出传递数据的时候申请
     }
+
+    return ProcessInputBuffers(batch_tasks, batch_result, inhost_buffer_, inhost_line_size_, input_offset);
+}
+
+int Inference::ProcessInputBuffers(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
+                                   std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
+                                   std::vector<int> &input_offset)
+{
     for (size_t i = 0; i < batch_tasks.size(); i++) {
         TRITONBACKEND_Request *request = batch_tasks[i];
-        for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
-            TRITONBACKEND_Input *input;
-            TRITONBACKEND_RequestInputByIndex(request, j, &input);
-            TRITONSERVER_DataType datatype;
-            const int64_t *shape;
-            uint32_t dims_count;
-            const char *input_name;
-            TRITONBACKEND_InputProperties(input, &input_name, &datatype, &shape, &dims_count, nullptr, nullptr);
-            const void *buffer;
-            uint64_t buffer_size;
-            TRITONSERVER_MemoryType memory_type;
-            int64_t memory_type_id;
-            TRITONBACKEND_InputBuffer(input, 0, &buffer, &buffer_size, &memory_type, &memory_type_id);
-            // 此处向总申请的输入host内存复制
-
-            if (model_state_->GetDynamicmode().preferred_batch_sizes.size() > 0 &&
-                model_state_->GetModelNode() == ModelState::ModelMode::MAX_BATCH &&
-                model_state_->GetInToOutMap().size() == 0) {
-                if (batch_result[i] * inhost_line_size_[j] != buffer_size) {
-                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("buffer_size get error")).c_str());
-                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("batch_result[") + std::to_string(i) +
-                                                         "]: " + std::to_string(batch_result[i]))
-                                                            .c_str());
-
-                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("inhost_line_size_[") + std::to_string(j) +
-                                                         "]: " + std::to_string(inhost_line_size_[j]))
-                                                            .c_str());
-
-                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                                (std::string("buffer_size: ") + std::to_string(buffer_size)).c_str());
-                    return RET_ERR;
-                }
-                std::copy((BYTE_PTR)buffer, (BYTE_PTR)buffer + buffer_size,
-                          (BYTE_PTR)inhost_buffer_[j] + input_offset[i] * inhost_line_size_[j]);
-            } else {
-                vector<int64_t> v1;
-                for (size_t i = 0; i < dims_count; i++) {
-                    v1.push_back(shape[i]);
-                }
-                input_tensor_info_[j].tensor_dims_ = v1;
-                void *host_buffer = nullptr;
-                acl_ret = aclrtMallocHost(&host_buffer, buffer_size);
-                if (acl_ret != ACL_SUCCESS) {
-                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                                (std::string("malloc host buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
-                    return RET_ERR;
-                }
-                inhost_buffer_.push_back(host_buffer);
-                std::copy((BYTE_PTR) buffer, (BYTE_PTR) buffer + buffer_size, (BYTE_PTR) host_buffer);
-                size_t sample_element_size = GetValueByKey(model_state_->GetInputClientTensors()[j].dtype_);
-                int per_buffer_size = sample_element_size;
-
-                for (size_t k = 1; k < dims_count; k++) {
-                    per_buffer_size *= shape[k];
-                }
-                inhost_line_size_.push_back(per_buffer_size);
-            }
-        }
+        ProcessRequestInputs(request, i, batch_result, inhost_buffer_, inhost_line_size_, input_offset);
     }
     return RET_OK;
+}
+
+void Inference::ProcessRequestInputs(TRITONBACKEND_Request *request, size_t request_index,
+                                     std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
+                                     std::vector<int> &inhost_line_size_, std::vector<int> &input_offset)
+{
+    for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
+        TRITONBACKEND_Input *input;
+        TRITONBACKEND_RequestInputByIndex(request, j, &input);
+        ProcessInputBuffer(input, j, request_index, batch_result, inhost_buffer_, inhost_line_size_, input_offset);
+    }
+}
+
+void Inference::ProcessInputBuffer(TRITONBACKEND_Input *input, size_t input_index, size_t request_index,
+                                   std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
+                                   std::vector<int> &inhost_line_size_, std::vector<int> &input_offset)
+{
+    TRITONSERVER_DataType datatype;
+    const int64_t *shape;
+    uint32_t dims_count;
+    const char *input_name;
+    TRITONBACKEND_InputProperties(input, &input_name, &datatype, &shape, &dims_count, nullptr, nullptr);
+    const void *buffer;
+    uint64_t buffer_size;
+    TRITONSERVER_MemoryType memory_type;
+    int64_t memory_type_id;
+    TRITONBACKEND_InputBuffer(input, 0, &buffer, &buffer_size, &memory_type, &memory_type_id);
+
+    // 此处向总申请的输入host内存复制
+    if (CanCombine(model_state_)) {
+        if (batch_result[request_index] * inhost_line_size_[input_index] != buffer_size) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("buffer_size get error")).c_str());
+            return;
+        }
+        std::copy(static_cast<const char *>(buffer), static_cast<const char *>(buffer) + buffer_size,
+                  static_cast<char *>(inhost_buffer_[input_index]) +
+                      input_offset[request_index] * inhost_line_size_[input_index]);
+    } else {
+        AllocateSingleMemory(model_state_, input_index, inhost_buffer_, inhost_line_size_, shape, dims_count, buffer,
+                             buffer_size);
+    }
+}
+
+bool Inference::CanCombine(ModelState *model_state)
+{
+    return model_state->GetDynamicmode().preferred_batch_sizes.size() > 0 &&
+           model_state->GetModelNode() == ModelState::ModelMode::MAX_BATCH && model_state->GetInToOutMap().size() == 0;
+}
+
+void Inference::AllocateCombinedMemory(ModelState *model_state, std::vector<void *> &inhost_buffer_,
+                                       std::vector<int> &inhost_line_size_, int batch_total)
+{
+    aclError acl_ret;
+    for (size_t i = 0; i < model_state->GetInputCount(); i++) {
+        size_t sample_element_size = GetValueByKey(model_state->GetInputClientTensors()[i].dtype_);  // 单个元素大小
+        int64_t total_out_size = static_cast<int64_t>(sample_element_size);
+        int per_buffer_size = sample_element_size;
+        if (input_tensor_info_[i].tensor_dims_.size() == 0) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                        (std::string("input_tensor_info_[i].tensor_dims_.size() is: empty")).c_str());
+            return;
+        }
+        vector<int64_t> &dims_in = input_tensor_info_[i].tensor_dims_;
+        total_out_size *= batch_total;
+        for (size_t k = 0; k < dims_in.size(); k++) {
+            total_out_size *= dims_in[k];
+            per_buffer_size *= dims_in[k];
+        }
+        void *inhost_buffer = nullptr;
+        acl_ret = aclrtMallocHost(&inhost_buffer, total_out_size);
+        if (acl_ret != ACL_SUCCESS) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                        (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
+            return;
+        }
+        inhost_buffer_.push_back(inhost_buffer);
+        inhost_line_size_.push_back(per_buffer_size);
+    }
+}
+
+void Inference::AllocateSingleMemory(ModelState *model_state, size_t j, std::vector<void *> &inhost_buffer_,
+                                     std::vector<int> &inhost_line_size_, const int64_t *shape, uint32_t dims_count,
+                                     const void *buffer, uint64_t buffer_size)
+{
+    aclError acl_ret;
+    vector<int64_t> v1;
+    for (size_t i = 0; i < dims_count; i++) {
+        v1.push_back(shape[i]);
+    }
+    input_tensor_info_[j].tensor_dims_ = v1;
+    void *host_buffer = nullptr;
+    acl_ret = aclrtMallocHost(&host_buffer, buffer_size);
+    if (acl_ret != ACL_SUCCESS) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                    (std::string("malloc host buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
+        return;
+    }
+    inhost_buffer_.push_back(host_buffer);
+    std::copy((BYTE_PTR)buffer, (BYTE_PTR)buffer + buffer_size, (BYTE_PTR)host_buffer);
+    size_t sample_element_size = GetValueByKey(model_state->GetInputClientTensors()[j].dtype_);
+    int per_buffer_size = sample_element_size;
+    int index = 1;
+    ModelState::ModelMode modelmode = model_state_->GetModelNode();
+    if (modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME ||
+        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
+        index = 0;
+    }
+    for (size_t k = index; k < dims_count; k++) {
+        per_buffer_size *= shape[k];
+    }
+    inhost_line_size_.push_back(per_buffer_size);
 }
 
 // 准备输出缓冲区
@@ -284,9 +318,9 @@ int Inference::PrepareOutputBuffers(std::vector<void *> &outhost_buffer_, std::v
         outhost_buffer_.push_back(outhost_buffer);
         outsize.push_back(total_out_size);
         int index = 0;
-        int modelmode = static_cast<int>(model_state_->GetModelNode());
-        if (modelmode == NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
-            modelmode == NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
+        ModelState::ModelMode modelmode = model_state_->GetModelNode();
+        if (modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
+            modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
             index = 1;
         }
         int per_buffer_size = sample_element_size;
@@ -344,9 +378,11 @@ int Inference::BuildInputTensor(size_t input_index, int exec_batch, void *dev_bu
     }
     vector<int64_t> dims_in;
     int index = 1;
-    int modelmode = static_cast<int>(model_state_->GetModelNode());
-    if (modelmode == NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
-        modelmode == NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
+    ModelState::ModelMode modelmode = model_state_->GetModelNode();
+    if (modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
+        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM ||
+        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME ||
+        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
         index = 0;
     }
     if (model_state_->GetModelNode() == ModelState::ModelMode::MAX_BATCH && model_state_->GetInToOutMap().size() == 0) {
@@ -496,7 +532,7 @@ int Inference::ExecuteInferenceCycle(Scheduler::Instance *instance, std::vector<
         for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
             int buffer_size = exec_batch * inhost_line_size_[j];
             void *src_ptr =
-                (void *)((BYTE_PTR) inhost_buffer_[j] + (input_offset[instance_index] + k) * inhost_line_size_[j]);
+                (void *)((BYTE_PTR)inhost_buffer_[j] + (input_offset[instance_index] + k) * inhost_line_size_[j]);
 
             acl_ret = aclrtMemcpy(inputs[j].GetAddr(), buffer_size, src_ptr, buffer_size, ACL_MEMCPY_HOST_TO_DEVICE);
             if (acl_ret != ACL_SUCCESS) {
@@ -530,7 +566,7 @@ int Inference::ExecuteInferenceCycle(Scheduler::Instance *instance, std::vector<
             int total_out_size = exec_batch * outhost_line_size_[j];
             void *outdevBuffer = outputs[j].GetAddr();
             void *dst_ptr =
-                (void *)((BYTE_PTR) outhost_buffer_[j] + (input_offset[instance_index] + k) * outhost_line_size_[j]);
+                (void *)((BYTE_PTR)outhost_buffer_[j] + (input_offset[instance_index] + k) * outhost_line_size_[j]);
 
             aclrtMemcpy(dst_ptr, total_out_size, outdevBuffer, total_out_size, ACL_MEMCPY_DEVICE_TO_HOST);
         }
@@ -966,66 +1002,63 @@ int Inference::Calculate(int a, int b, char op)
 int Inference::GetDimNum(std::map<std::string, int> values, std::string formula)
 {
     // 步骤1：替换变量名为对应的数值
-    string processedFormula = formula;
+    string processedFormula = ReplaceVariables(formula, values);
 
-    // 遍历map，替换所有变量名
-    for (const auto &pair : values) {
+    // 步骤2：将中缀表达式转换为后缀表达式
+    vector<string> postfix = InfixToPostfix(processedFormula);
+
+    // 步骤3：计算后缀表达式
+    return EvaluatePostfix(postfix);
+}
+
+std::string Inference::ReplaceVariables(std::string &formula, std::map<std::string, int> &values)
+{
+    string result = formula;
+    for (auto &pair : values) {
         string variable = pair.first;
         string value = to_string(pair.second);
 
         size_t pos = 0;
-        while ((pos = processedFormula.find(variable, pos)) != string::npos) {
+        while ((pos = result.find(variable, pos)) != string::npos) {
             // 检查变量名前后是否是字母或数字，确保是完整的变量名
-            bool validBefore = (pos == 0 || !isalnum(processedFormula[pos - 1]));
-            bool validAfter = (pos + variable.length() == processedFormula.length() ||
-                               !isalnum(processedFormula[pos + variable.length()]));
+            bool validBefore = (pos == 0 || !isalnum(result[pos - 1]));
+            bool validAfter = (pos + variable.length() == result.length() || !isalnum(result[pos + variable.length()]));
+
             if (validBefore && validAfter) {
-                processedFormula.replace(pos, variable.length(), value);
+                result.replace(pos, variable.length(), value);
                 pos += value.length();
             } else {
                 pos += variable.length();
             }
         }
     }
+    return result;
+}
 
-    // 步骤2：将中缀表达式转换为后缀表达式（逆波兰表示法）
+std::vector<std::string> Inference::InfixToPostfix(std::string &formula)
+{
     stack<char> opStack;
     vector<string> output;
     string currentNumber;
 
-    for (size_t i = 0; i < processedFormula.length(); i++) {
-        char c = processedFormula[i];
+    ProcessFormulaCharacters(formula, opStack, output, currentNumber);
+    HandleRemainingOperators(opStack, output);
+
+    return output;
+}
+
+void Inference::ProcessFormulaCharacters(std::string &formula, std::stack<char> &opStack,
+                                         std::vector<std::string> &output, std::string &currentNumber)
+{
+    for (size_t i = 0; i < formula.length(); i++) {
+        char c = formula[i];
 
         if (isdigit(c)) {
             // 处理数字（可能有多位）
             currentNumber += c;
         } else {
-            // 如果之前有数字，先添加到输出
-            if (!currentNumber.empty()) {
-                output.push_back(currentNumber);
-                currentNumber.clear();
-            }
-
-            if (c == '(') {
-                opStack.push(c);
-            } else if (c == ')') {
-                // 弹出直到遇到左括号
-                while (!opStack.empty() && opStack.top() != '(') {
-                    output.push_back(string(1, opStack.top()));
-                    opStack.pop();
-                }
-                if (!opStack.empty() && opStack.top() == '(') {
-                    opStack.pop();  // 弹出左括号
-                }
-            } else if (IsOperator(c)) {
-                // 处理运算符优先级
-                while (!opStack.empty() && GetPriority(opStack.top()) >= GetPriority(c)) {
-                    output.push_back(string(1, opStack.top()));
-                    opStack.pop();
-                }
-                opStack.push(c);
-            }
-            // 忽略空格等其他字符
+            ProcessCurrentNumber(currentNumber, output);
+            ProcessCharacter(c, opStack, output);
         }
     }
 
@@ -1033,17 +1066,64 @@ int Inference::GetDimNum(std::map<std::string, int> values, std::string formula)
     if (!currentNumber.empty()) {
         output.push_back(currentNumber);
     }
+}
 
+void Inference::ProcessCurrentNumber(std::string &currentNumber, std::vector<std::string> &output)
+{
+    if (!currentNumber.empty()) {
+        output.push_back(currentNumber);
+        currentNumber.clear();
+    }
+}
+
+void Inference::ProcessCharacter(char c, std::stack<char> &opStack, std::vector<std::string> &output)
+{
+    if (c == '(') {
+        opStack.push(c);
+    } else if (c == ')') {
+        ProcessRightParenthesis(opStack, output);
+    } else if (IsOperator(c)) {
+        ProcessOperator(c, opStack, output);
+    }
+    // 忽略空格等其他字符
+}
+
+void Inference::ProcessRightParenthesis(std::stack<char> &opStack, std::vector<std::string> &output)
+{
+    // 弹出直到遇到左括号
+    while (!opStack.empty() && opStack.top() != '(') {
+        output.push_back(string(1, opStack.top()));
+        opStack.pop();
+    }
+    if (!opStack.empty() && opStack.top() == '(') {
+        opStack.pop();  // 弹出左括号
+    }
+}
+
+void Inference::ProcessOperator(char c, std::stack<char> &opStack, std::vector<std::string> &output)
+{
+    // 处理运算符优先级
+    while (!opStack.empty() && GetPriority(opStack.top()) >= GetPriority(c)) {
+        output.push_back(string(1, opStack.top()));
+        opStack.pop();
+    }
+    opStack.push(c);
+}
+
+void Inference::HandleRemainingOperators(std::stack<char> &opStack, std::vector<std::string> &output)
+{
     // 弹出栈中剩余的所有运算符
     while (!opStack.empty()) {
         output.push_back(string(1, opStack.top()));
         opStack.pop();
     }
+}
 
-    // 步骤3：计算后缀表达式
+int Inference::EvaluatePostfix(std::vector<std::string> &postfix)
+{
     stack<int> calcStack;
 
-    for (const string &token : output) {
+    for (string &token : postfix) {
         if (isdigit(token[0]) || (token.length() > 1 && isdigit(token[1]))) {
             // 如果是数字，压入栈中
             calcStack.push(stoi(token));
@@ -1073,7 +1153,7 @@ void Inference::PrintOutputInfo(std::map<std::pair<size_t, size_t>, triton::back
     for (auto &p1 : m1) {
         const pair<size_t, size_t> &index = p1.first;
         const ModelState::Express &ex = p1.second;
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("key ") + std::to_string(index.first) + std::string(" ") +
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("index ") + std::to_string(index.first) + std::string(" ") +
                                                std::to_string(index.second))
                                                   .c_str());
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("ex.expressName ") + ex.expressName).c_str());
@@ -1088,61 +1168,31 @@ void Inference::PrintOutputInfo(std::map<std::pair<size_t, size_t>, triton::back
 
 void Inference::CalcNegativeOne()
 {
-    for (size_t i = 0; i < model_state_->GetOutputCount(); i++) {
-        output_tensor_info_[i].tensor_dims_ = model_state_->GetOutputClientTensors()[i].dims_;
-        std::string output_dims_str = "Output tensor " + std::to_string(i) + " dimensions: [";
-        for (size_t j = 0; j < output_tensor_info_[i].tensor_dims_.size(); j++) {
-            output_dims_str += std::to_string(output_tensor_info_[i].tensor_dims_[j]) + " ";
-        }
-        output_dims_str += "]";
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, output_dims_str.c_str());
-    }
+    // 打印输出张量初始维度
+    PrintOutputDimensions();
 
     std::map<std::pair<size_t, size_t>, triton::backend::npu_ge::ModelState::Express> m1 =
         model_state_->GetInToOutMap();
     if (m1.size() == 0) {
         return;
     }
+
     PrintOutputInfo(m1);
-    for (auto &p1 : m1) {
-        const pair<size_t, size_t> &index = p1.first;
-        const ModelState::Express &ex = p1.second;
-        map<string, int> values1;
-        if (model_state_->GetModelNode() ==
-            ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
-            for (auto pair : ex.dimMap) {
-                values1[pair.first] = input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second + 1];
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                            (std::string("pair.first ") + pair.first + std::string(" value") +
-                             std::to_string(input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second + 1]))
-                                .c_str());
-            }
-            // Dimensions should exclude the batch dimension
-            output_tensor_info_[index.first].tensor_dims_[index.second] = GetDimNum(values1, ex.expressName);
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                        (std::string("Result ") + std::to_string(index.first) + std::string(" ") +
-                         std::to_string(index.second) +
-                         std::to_string(output_tensor_info_[index.first].tensor_dims_[index.second]))
-                            .c_str());
-        } else {
-            for (auto pair : ex.dimMap) {
-                values1[pair.first] = input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second];
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                            (std::string("pair.first ") + pair.first + std::string(" value") +
-                             std::to_string(input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second]))
-                                .c_str());
-            }
-            output_tensor_info_[index.first].tensor_dims_[index.second] = GetDimNum(values1, ex.expressName);
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                        (std::string("Result is ") + std::to_string(index.first) + std::string(" ") +
-                         std::to_string(index.second) +
-                         std::to_string(output_tensor_info_[index.first].tensor_dims_[index.second]))
-                            .c_str());
-        }
-    }
+
+    ProcessMapEntries(m1);
+
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "Calculation of -1 completed");
 
+    // 打印输出张量最终维度
+    PrintOutputDimensions();
+}
+
+void Inference::PrintOutputDimensions()
+{
     for (size_t i = 0; i < model_state_->GetOutputCount(); i++) {
+        if (output_tensor_info_[i].tensor_dims_.size() == 0) {
+            output_tensor_info_[i].tensor_dims_ = model_state_->GetOutputClientTensors()[i].dims_;
+        }
         std::string output_dims_str = "Output tensor " + std::to_string(i) + " dimensions: [";
         for (size_t j = 0; j < output_tensor_info_[i].tensor_dims_.size(); j++) {
             output_dims_str += std::to_string(output_tensor_info_[i].tensor_dims_[j]) + " ";
@@ -1150,6 +1200,58 @@ void Inference::CalcNegativeOne()
         output_dims_str += "]";
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, output_dims_str.c_str());
     }
+}
+
+void Inference::ProcessMapEntries(std::map<std::pair<size_t, size_t>, triton::backend::npu_ge::ModelState::Express> &m1)
+{
+    for (auto &p1 : m1) {
+        pair<size_t, size_t> index = p1.first;
+        ModelState::Express &ex = p1.second;
+        map<string, int> values1;
+
+        if (model_state_->GetModelNode() ==
+            ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
+            ProcessValuesWithBatchOffset(ex, values1, index);
+        } else {
+            ProcessValuesWithoutBatchOffset(ex, values1, index);
+        }
+
+        // 计算并设置结果
+        output_tensor_info_[index.first].tensor_dims_[index.second] = GetDimNum(values1, ex.expressName);
+        LogResult(index, ex.expressName);
+    }
+}
+
+void Inference::ProcessValuesWithBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1,
+                                             std::pair<size_t, size_t> &index)
+{
+    for (auto &pair : ex.dimMap) {
+        values1[pair.first] = input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second + 1];
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
+                    (std::string("pair.first ") + pair.first + std::string(" value") +
+                     std::to_string(input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second + 1]))
+                        .c_str());
+    }
+}
+
+void Inference::ProcessValuesWithoutBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1,
+                                                std::pair<size_t, size_t> &index)
+{
+    for (auto &pair : ex.dimMap) {
+        values1[pair.first] = input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second];
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
+                    (std::string("pair.first ") + pair.first + std::string(" value") +
+                     std::to_string(input_tensor_info_[pair.second.first].tensor_dims_[pair.second.second]))
+                        .c_str());
+    }
+}
+
+void Inference::LogResult(std::pair<size_t, size_t> &index, std::string &expressName)
+{
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("Result ") + std::to_string(index.first) + std::string(" ") +
+                                           std::to_string(index.second) + std::string(" ") +
+                                           std::to_string(output_tensor_info_[index.first].tensor_dims_[index.second]))
+                                              .c_str());
 }
 
 int Inference::BatchSplicTasks(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result)
@@ -1165,6 +1267,13 @@ int Inference::BatchSplicTasks(std::vector<TRITONBACKEND_Request *> &batch_tasks
 void Inference::SetBatchTaskAndResult(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
                                       TRITONBACKEND_Request **requests, int i)
 {
+    ModelState::ModelMode modelmode = model_state_->GetModelNode();
+    if (modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME ||
+        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
+        batch_tasks.push_back(requests[i]);
+        batch_result.push_back(1);
+        return;
+    }
     batch_tasks.push_back(requests[i]);
     TRITONBACKEND_Input *input;
     TRITONBACKEND_RequestInputByIndex(requests[i], 0, &input);

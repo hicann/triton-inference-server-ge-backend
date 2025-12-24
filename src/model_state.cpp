@@ -448,17 +448,24 @@ void ModelState::ParseParameterValue(common::TritonJson::Value &params, const st
     }
 }
 
-// 查找ONNX模型文件
+// 查找模型文件
 void ModelState::FindModelFile()
 {
-    model_file_ = FindFirstOnnxFile(std::string(runtime_modeldir_));
-    if (model_file_ == "") {
-        TRITONSERVER_Error *error =
-            TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, "can't find onnx file in model path!");
-        TRITONSERVER_ErrorDelete(error);
-    } else {
+    model_file_ = FindFirstFile(std::string(runtime_modeldir_), ".onnx");
+    if (model_file_ != "") {
         LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("find onnx path: ") + model_file_).c_str());
+        model_type_ = ModelState::ModelType::ONNX;
+        return;
     }
+    model_file_ = FindFirstFile(std::string(runtime_modeldir_), ".pb");
+    if (model_file_ != "") {
+        LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("find tensorflow pb path: ") + model_file_).c_str());
+        model_type_ = ModelState::ModelType::TENSORFLOW;
+        return;
+    }
+    TRITONSERVER_Error *error =
+        TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, "can't find model file in model path!");
+    TRITONSERVER_ErrorDelete(error);
 }
 
 // 确定推理模式
@@ -513,12 +520,6 @@ int ModelState::GetFirstDimNum()
                 break;
             }
         }
-        for (size_t i = 0; i < output_client_tensor_.size(); i++) {
-            if (compare != output_client_tensor_[i].dims_[0]) {
-                flag = 1;
-                break;
-            }
-        }
         if (flag == 1) {
             return INT_MAX;
         }
@@ -529,12 +530,6 @@ int ModelState::GetFirstDimNum()
         int flag = 0;
         for (size_t i = 0; i < input_onnx_tensor_.size(); i++) {
             if (compare != input_onnx_tensor_[i].dims_[0]) {
-                flag = 1;
-                break;
-            }
-        }
-        for (size_t i = 0; i < output_onnx_tensor_.size(); i++) {
-            if (compare != output_onnx_tensor_[i].dims_[0]) {
                 flag = 1;
                 break;
             }
@@ -565,6 +560,31 @@ bool ModelState::ContainNegativeOneFromTensor(size_t index)
     return false;
 }
 
+// -1 未读取到有效数值 0 不相等 1 相等
+int ModelState::FirstDimNameSame()
+{
+    if (input_onnx_tensor_.size() > 0 && output_onnx_tensor_.size() > 0) {
+        string compare = input_onnx_tensor_[0].dim_name_[0];
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("compare") + compare).c_str());
+        int flag = 0;
+        for (size_t i = 0; i < input_onnx_tensor_.size(); i++) {
+            LOG_MESSAGE(
+                TRITONSERVER_LOG_VERBOSE,
+                (std::string("input_onnx_tensor_[i].dim_name_[0] ") + input_onnx_tensor_[i].dim_name_[0]).c_str());
+            if (compare != input_onnx_tensor_[i].dim_name_[0]) {
+                flag = 1;
+                break;
+            }
+        }
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("flag ") + std::to_string(flag)).c_str());
+        if (flag == 1) {
+            return 0;
+        }
+        return 1;
+    }
+    return -1;
+}
+
 void ModelState::SetModelMode()
 {
     if (MaxBatchSize() > 0) {
@@ -577,11 +597,21 @@ void ModelState::SetModelMode()
     }
     int res = GetFirstDimNum();
     if (res == INT_MAX) {
-        model_mode_ = ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME;
+        if (ContainNegativeOneFromTensor(0)) {
+            model_mode_ = ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE;
+        } else {
+            model_mode_ = ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME;
+        }
     } else if (res == INT_MAX - 1) {
         model_mode_ = ModelMode::TENSOR_ZERO;
     } else if (res == -1) {
-        if (ContainNegativeOneFromTensor()) {
+        // 判断-1的dim_name_是否一致
+        int ret = FirstDimNameSame();
+        if (ret == -1) {
+            model_mode_ = ModelMode::TENSOR_ZERO;
+        } else if (ret == 0) {
+            model_mode_ = ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE;
+        } else if (ContainNegativeOneFromTensor()) {
             model_mode_ = ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM;
         } else {
             model_mode_ = ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE;
@@ -609,46 +639,56 @@ ModelState::ModelState(TRITONBACKEND_Model *triton_model) : BackendModel(triton_
     DetermineInferMode();
     ParseOnnxInfo();
     SetModelMode();
-    PrintModelConfig();
 }
 
-// 检查是否为ONNX文件并返回路径
-std::string ModelState::CheckAndReturnOnnxFile(const std::string &filePath)
+// 检查是否为文件并返回路径
+std::string ModelState::CheckAndReturnFile(const std::string &filePath, const std::string &extension)
 {
-    std::string onnx_extension = ".onnx";
-    if (filePath.size() >= onnx_extension.size() &&
-        filePath.substr(filePath.size() - onnx_extension.size()) == onnx_extension) {
+    if (filePath.size() >= extension.size() && filePath.substr(filePath.size() - extension.size()) == extension) {
         return filePath;  // 返回副本，安全
     }
     return "";  // 返回空字符串表示未找到
 }
 
 // 在目录中搜索ONNX文件
-std::string ModelState::SearchOnnxFileInDirectory(const std::string &path)
+std::string ModelState::SearchFileInDirectory(const std::string &path, const std::string &extension)
 {
     for (const auto &entry : std::filesystem::directory_iterator(path)) {
-        try {
-            if (entry.is_directory()) {
-                std::string result = FindFirstOnnxFile(entry.path().string());
-                if (!result.empty()) {
-                    return result;
-                }
-            } else if (entry.is_regular_file()) {
-                std::string result = CheckAndReturnOnnxFile(entry.path().string());
-                if (!result.empty()) {
-                    return result;
-                }
-            }
-        } catch (const std::filesystem::filesystem_error &e) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("Error accessing file: " + std::string(e.what())).c_str());
-            continue;
+        std::string result = ProcessEntry(entry, extension);
+        if (!result.empty()) {
+            return result;
         }
     }
     return "";  // 返回空字符串表示未找到
 }
 
+std::string ModelState::ProcessEntry(const std::filesystem::directory_entry &entry, const std::string &extension)
+{
+    try {
+        if (entry.is_directory()) {
+            std::string result = FindFirstFile(entry.path().string(), extension);
+            if (!result.empty()) {
+                return result;
+            }
+        } else if (entry.is_regular_file()) {
+            std::string result = CheckAndReturnFile(entry.path().string(), extension);
+            if (!result.empty()) {
+                return result;
+            }
+        }
+    } catch (const std::filesystem::filesystem_error &e) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("Error accessing file: " + std::string(e.what())).c_str());
+        // 返回空字符串表示处理失败，但不抛出异常
+        return "";
+    } catch (const std::exception &e) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("General error: " + std::string(e.what())).c_str());
+        return "";
+    }
+    return "";
+}
+
 // 递归查找第一个.onnx文件
-std::string ModelState::FindFirstOnnxFile(const std::string &path)
+std::string ModelState::FindFirstFile(const std::string &path, const std::string &extension)
 {
     try {
         if (!std::filesystem::exists(path)) {
@@ -656,10 +696,10 @@ std::string ModelState::FindFirstOnnxFile(const std::string &path)
         }
 
         if (!std::filesystem::is_directory(path)) {
-            return CheckAndReturnOnnxFile(path);
+            return CheckAndReturnFile(path, extension);
         }
 
-        return SearchOnnxFileInDirectory(path);
+        return SearchFileInDirectory(path, extension);
     } catch (const std::filesystem::filesystem_error &e) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("File system error: " + std::string(e.what())).c_str());
     }
@@ -720,30 +760,46 @@ std::unordered_set<std::string> ModelState::ExtractVariables(const std::string &
     return variables;
 }
 
-// 根据onnx的记录和pbtxt的获取值进行对比
+// 根据记录和pbtxt的获取值进行对比
 
 TRITONSERVER_Error *ModelState::FindOutputDim(std::unordered_set<std::string> &umap1, Express &ex)
 {
+    return ProcessFindOutputDim(umap1, ex);
+}
+
+TRITONSERVER_Error *ModelState::ProcessFindOutputDim(std::unordered_set<std::string> &umap1, Express &ex)
+{
+    // 处理每个查找名称
     for (auto it = umap1.begin(); it != umap1.end(); it++) {
         string findname = *it;
-        int flag = 0;
-        for (size_t i = 0; i < input_client_tensor_.size(); i++) {
-            std::vector<std::string> v2 = input_client_tensor_[i].dim_name_;
+        TRITONSERVER_Error *error = FindAndSetDim(ex, findname);
+        if (error != nullptr) {
+            return error;
+        }
+    }
+    return nullptr;
+}
 
-            for (size_t j = 0; j < v2.size(); j++) {
-                if (v2[j] == findname) {
-                    ex.dimMap[findname] = make_pair(i, j);
-                    flag = 1;
-                    break;
-                }
-            }
-            if (flag == 1) {
+TRITONSERVER_Error *ModelState::FindAndSetDim(Express &ex, const string &findname)
+{
+    int flag = 0;
+    for (size_t i = 0; i < input_client_tensor_.size(); i++) {
+        std::vector<std::string> v2 = input_client_tensor_[i].dim_name_;
+
+        for (size_t j = 0; j < v2.size(); j++) {
+            if (v2[j] == findname) {
+                ex.dimMap[findname] = make_pair(i, j);
+                flag = 1;
                 break;
             }
         }
-        if (flag == 0) {
-            return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNSUPPORTED, (findname + " have not find ").c_str());
+        if (flag == 1) {
+            break;
         }
+    }
+
+    if (flag == 0) {
+        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNSUPPORTED, (findname + " have not find ").c_str());
     }
     return nullptr;
 }
@@ -819,8 +875,9 @@ TRITONSERVER_Error *ModelState::CreateInputdimToOutputdim()
 
 TRITONSERVER_Error *ModelState::CheckModelMode()
 {
-    if (model_mode_ == ModelMode::TENSOR_ZERO || model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME) {
-        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNSUPPORTED, (std::string("not support model_mode_")).c_str());
+    if (model_mode_ == ModelMode::TENSOR_ZERO) {
+        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNSUPPORTED,
+                                     (std::string("not support model_mode_") + PrintModelMode(model_mode_)).c_str());
     }
     return nullptr;
 }
@@ -828,13 +885,15 @@ TRITONSERVER_Error *ModelState::CheckModelMode()
 TRITONSERVER_Error *ModelState::InputdimToOutputdimMap(ModelState **state)
 {
     if (model_mode_ == ModelMode::MAX_BATCH || model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
-        model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE) {
+        model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE ||
+        model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME) {
         // No need to process, keep input_client_tensor_ settings
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("Current mode ") + PrintModelMode(model_mode_)).c_str());
     }
     if (model_mode_ == ModelMode::MAX_BATCH_HAVE_UNKNOW_DIM ||
         model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM ||
-        model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
+        model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM ||
+        model_mode_ == ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("Current mode ") + PrintModelMode(model_mode_)).c_str());
         RETURN_IF_ERROR((*state)->CreateInputdimToOutputdim());
     }
@@ -922,6 +981,8 @@ std::string ModelState::PrintModelMode(ModelState::ModelMode mode)
             return "NO_MAX_BATCH_FIRST_NOT_SAME";
         case ModelState::ModelMode::TENSOR_ZERO:
             return "TENSOR_ZERO";
+        case ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE:
+            return "NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE";
         default:
             return "UNKNOWN_MODEL_MODE: " + to_string(static_cast<int>(mode));
     }
@@ -949,16 +1010,20 @@ TRITONSERVER_Error *ModelState::Create(TRITONBACKEND_Model *triton_model, ModelS
     bool auto_complete_config = false;
     RETURN_IF_ERROR(TRITONBACKEND_ModelAutoCompleteConfig(triton_model, &auto_complete_config));
     if (auto_complete_config) {
-        RETURN_IF_ERROR((*state)->AutoCompleteConfig());
-        int modelmode = static_cast<int>((*state)->GetModelNode());
-        if (modelmode != 0 && modelmode != 1) {
-            // (*state)->CompareOnnxAndTxt();
-            RETURN_IF_ERROR((*state)->PreNegativeOne());
+        if ((*state)->GetModelType() == ModelState::ModelType::ONNX) {
+            LOG_MESSAGE(TRITONSERVER_LOG_INFO, "start auto complete onnx config");
+            RETURN_IF_ERROR((*state)->AutoCompleteConfig());
+            ModelMode modelmode = (*state)->GetModelNode();
+            if (modelmode != ModelMode::MAX_BATCH && modelmode != ModelMode::MAX_BATCH_HAVE_UNKNOW_DIM &&
+                modelmode != ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME &&
+                modelmode != ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
+                RETURN_IF_ERROR((*state)->PreNegativeOne());
+            }
+            RETURN_IF_ERROR((*state)->SetModelConfig());
         }
-        RETURN_IF_ERROR((*state)->SetModelConfig());
     }
     (*state)->CheckDynamicBatch();
-    // (*state)->ChangeOutputdim();
+    (*state)->PrintModelConfig();
     RETURN_IF_ERROR((*state)->InputdimToOutputdimMap(state));
 
     return nullptr;  // success
@@ -973,27 +1038,7 @@ std::vector<std::string> ModelState::GetOnnxSymbolicDimension(const Ort::TypeInf
 {
     std::vector<std::string> result;
     try {
-        // Note: GetSymbolicDimensions may have different availability across versions
-        auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
-        std::vector<const char *> raw_dims = tensor_info.GetSymbolicDimensions();
-
-        result.reserve(raw_dims.size());
-        for (const char *dim : raw_dims) {
-            result.push_back(dim ? std::string(dim) : "unknown");
-        }
-
-        if (!result.empty()) {
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("  Symbolic dimensions: ")).c_str());
-            for (size_t j = 0; j < result.size(); j++) {
-                if (j > 0) {
-                    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string(", ")).c_str());
-                }
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                            (std::string("Dimension") + std::to_string(j) + ": '" + result[j] + "'").c_str());
-            }
-        } else {
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("  No symbolic dimension information")).c_str());
-        }
+        result = ProcessSymbolicDimensions(type_info);
     } catch (const Ort::Exception &e) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("GetSymbolicDimensions() not available:  ") + e.what()).c_str());
@@ -1001,6 +1046,36 @@ std::vector<std::string> ModelState::GetOnnxSymbolicDimension(const Ort::TypeInf
     return result;
 }
 
+std::vector<std::string> ModelState::ProcessSymbolicDimensions(const Ort::TypeInfo &type_info)
+{
+    std::vector<std::string> result;
+    auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+    std::vector<const char *> raw_dims = tensor_info.GetSymbolicDimensions();
+
+    result.reserve(raw_dims.size());
+    for (const char *dim : raw_dims) {
+        result.push_back(dim ? std::string(dim) : "unknown");
+    }
+
+    LogSymbolicDimensions(result);
+    return result;
+}
+
+void ModelState::LogSymbolicDimensions(const std::vector<std::string> &result)
+{
+    if (!result.empty()) {
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("  Symbolic dimensions: ")).c_str());
+        for (size_t j = 0; j < result.size(); j++) {
+            if (j > 0) {
+                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string(", ")).c_str());
+            }
+            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
+                        (std::string("Dimension") + std::to_string(j) + ": '" + result[j] + "'").c_str());
+        }
+    } else {
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("  No symbolic dimension information")).c_str());
+    }
+}
 bool ModelState::FindMapResult(std::string &name, std::tuple<size_t, size_t, std::string> &t1)
 {
     size_t len = input_onnx_tensor_.size();
@@ -1237,10 +1312,16 @@ TRITONSERVER_Error *ModelState::AutoCompleteIO(const char *key, const std::vecto
 bool ModelState::CheckDynamicBatch()
 {
     bool can_support_batching = true;
-    int modelmode = static_cast<int>(GetModelNode());
-    if (modelmode == 2 ||
+    ModelMode modelmode = GetModelNode();
+    if (modelmode == ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
+        modelmode == ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM ||
+        modelmode == ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME ||
         modelmode ==
-            3) {  // 2 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE 3 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM
+            ModelMode::
+                NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {  // 2 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE 3 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_VERBOSE,
+            (std::string("can_dynamic_batching: ") + std::to_string(static_cast<int>(can_dynamic_batching))).c_str());
         can_dynamic_batching = false;
         return false;
     }
@@ -1258,7 +1339,9 @@ bool ModelState::CheckDynamicBatch()
     }
     // 设置flag
     can_dynamic_batching = can_support_batching;
-
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_VERBOSE,
+        (std::string("can_dynamic_batching: ") + std::to_string(static_cast<int>(can_dynamic_batching))).c_str());
     return can_support_batching;
 }
 }

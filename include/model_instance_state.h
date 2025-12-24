@@ -29,7 +29,7 @@
 #include "all_ops.h"
 #include "acl/acl.h"
 #include "onnx_parser.h"
-
+#include "tensorflow_parser.h"
 #include "model_state.h"
 #include "scheduler.h"
 #include "inference.h"
@@ -42,6 +42,7 @@ namespace triton::backend::npu_ge {
 
 static std::atomic<int> next_id{0};
 static std::atomic<int> lock_id{0};
+static std::atomic<int> notify_id{0};
 
 class ModelInstanceState : public BackendModelInstance {
 public:
@@ -56,6 +57,26 @@ public:
     // 静态工具方法
     static std::string GetEnvVar(const std::string &name);
     static void LoadGeConfig(std::string &env_value, std::map<ge::AscendString, ge::AscendString> &configMap);
+
+    void ConfigureParserOptions(std::map<ge::AscendString, ge::AscendString> &parser_options);
+    bool ParseGraph(int graph_id, std::map<ge::AscendString, ge::AscendString> &parser_options, ge::Graph &graph1,
+                    std::mutex &mu);
+    bool AddAndCompileGraph(ge::Session *session_, int graph_id, ge::Graph &graph1, ge::Status &ret);
+    bool CreateAndLoadStream(ge::Session *session_, int graph_id, aclrtStream &stream_, ge::Status &ret,
+                             aclError &aclRet);
+    void ConfigureDumpOptions(std::map<ge::AscendString, ge::AscendString> &options);
+    bool SetDeviceAndContext(int dev_id, aclrtContext &context_);
+    void CreateSessions(int dev_id, int dev_index, int device_exec_block,
+                        const std::map<ge::AscendString, ge::AscendString> &options,
+                        std::vector<ge::Session *> &sessions);
+    void CreateThreads(int dev_id, int dev_index, int device_exec_block, std::mutex &mu, aclrtContext context_,
+                       const std::vector<ge::Session *> &sessions, std::vector<std::thread> &threads);
+    void RecordInitFailure(int graph_id);
+    void RecordInitException();
+    int InitializeGlobalResources();
+    int InitializeDeviceThreads(const std::vector<int> &dev_ids_, int lock);
+    void HandleInitFailure();
+    void InitializeGraphSession(int graph_id, int dev_id, aclrtContext context_, std::mutex &mu, ge::Session *session);
 
 private:
     // 初始化相关方法

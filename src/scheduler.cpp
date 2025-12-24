@@ -306,7 +306,7 @@ Scheduler::~Scheduler()
 {
     std::lock_guard<std::mutex> lock(mutex);
 
-    for (const auto &instance : instances) {
+    for (auto &instance : instances) {
         if (instance.session != nullptr) {
             LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, " delete session_");
             delete instance.session;
