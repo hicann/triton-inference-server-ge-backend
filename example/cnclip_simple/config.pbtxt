@@ -1,0 +1,22 @@
+name: "cnclip_simple"
+backend: "npu_ge"
+max_batch_size: 64 # 仅填写最大batch。input、output从onnx文件中读取
+
+instance_group [{
+  count: 64
+}
+]
+
+parameters: [
+{
+  key: "device_ids",
+  value: {string_value: "4"} #指定使用NPU ID
+}
+]
+
+dynamic_batching {
+  max_queue_delay_microseconds: 10000  # 等待合并的最大延迟（微秒），可调整
+  preferred_batch_size: [2, 4, 8]    # 优先合并成这些batch_size（可选）
+}
+
+

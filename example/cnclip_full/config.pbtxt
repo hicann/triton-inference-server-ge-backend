@@ -1,0 +1,55 @@
+name: "cnclip_full"
+backend: "npu_ge"
+max_batch_size: 64
+input [
+  {
+    name: "image"
+    data_type: TYPE_FP32
+    dims: [3, 224, 224 ]
+  }
+]
+output [
+  {
+    name: "unnorm_image_features"
+    data_type: TYPE_FP32
+    dims: [512 ]
+  }
+]
+
+instance_group [{
+  count: 16
+}
+]
+
+dynamic_batching { #动态batch合并，静态图场景下需删除
+  max_queue_delay_microseconds: 10000  # 等待合并的最大延迟（微秒），可调整
+  preferred_batch_size: [2, 4, 8]    # 优先合并成这些batch_size（可选）
+}
+
+parameters: [
+{
+  key: "device_ids",
+  value: {string_value: "4,5"}
+}
+]
+
+parameters: [
+{
+  key: "static_model",
+  value: {string_value: "0"} # GE静态图开关，此配置与 dynamic_batching 互斥
+}
+]
+
+parameters: [
+{
+  key: "profiling",
+  value: {string_value: "dynamic"} # 打开动态profiling
+}
+]
+
+parameters: [
+{
+  key: "ge.aicoreNum",
+  value: {string_value: "12|10"} # 锁核，每个Stream使用cube12个，vector10个
+}
+]

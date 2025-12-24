@@ -55,9 +55,13 @@ public:
         NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM,  // max_batch_size==0 所有张量维度0一样且不是-1 其余维度包含-1(未知)
         NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE,                  // max_batch_size==0 所有张量维度0一样且是-1
         NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM,  // max_batch_size==0 所有张量维度0一样且是-1
-        NO_MAX_BATCH_FIRST_NOT_SAME,                           // max_batch_size==0 所有张量维度0不一样
+        NO_MAX_BATCH_FIRST_NOT_SAME,  // max_batch_size==0 所有张量维度0不全一样且所有张量形状确认
+        NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE,  //  max_batch_size==0 所有张量维度0不全一样且存在未知维度 两种情况 1. 首维度都是-1   2. 其他
         TENSOR_ZERO
     };
+
+    enum class ModelType { NONE, ONNX, TENSORFLOW, CAFFE, OM, AIR };
+
     // 友元函数声明
     friend std::ostream &operator<<(std::ostream &os, ModelState::ModelMode mode);
 
@@ -72,12 +76,22 @@ public:
         return model_mode_;
     }
 
+    ModelType GetModelType()
+    {
+        return model_type_;
+    }
+
     struct OnnxTensorInfo {
         std::string name_;
         size_t dtype_;
         std::vector<int64_t> dims_;
         std::vector<std::string> dim_name_;
     };
+
+    std::string GetModelName()
+    {
+        return model_name_;
+    }
     // 获取方法
     std::string GetModelPath()
     {
@@ -152,6 +166,15 @@ public:
     {
         infer_mode_ = static_cast<InferMode>(mode);
     }
+    int GetInitStatus() const
+    {
+        return init_thread_tag_;
+    }
+
+    void SetInitStatus(int mode)
+    {
+        init_thread_tag_ = mode;
+    }
 
     // 配置解析方法
     void ParseGeConfig(const std::string &json_str);
@@ -192,6 +215,7 @@ public:
     {
         return dynamic_batching_;
     }
+    std::string ProcessEntry(const std::filesystem::directory_entry &entry, const std::string &extension);
 
 private:
     // 私有辅助方法
@@ -220,9 +244,9 @@ private:
     void InitializeBackendConfig(TRITONBACKEND_Model *triton_model);
     void DetermineInferMode();
 
-    std::string FindFirstOnnxFile(const std::string &path);
-    std::string CheckAndReturnOnnxFile(const std::string &filePath);
-    std::string SearchOnnxFileInDirectory(const std::string &path);
+    std::string FindFirstFile(const std::string &path, const std::string &extension);
+    std::string CheckAndReturnFile(const std::string &filePath, const std::string &extension);
+    std::string SearchFileInDirectory(const std::string &path, const std::string &extension);
 
     const char *runtime_modeldir_ = nullptr;
     std::string model_file_ = "";
@@ -284,6 +308,14 @@ private:
     void CompareOnnxAndTxt();
     std::string PrintModelMode(ModelState::ModelMode mode);
     bool can_dynamic_batching = false;
+    TRITONSERVER_Error *ProcessFindOutputDim(std::unordered_set<std::string> &umap1, Express &ex);
+    TRITONSERVER_Error *FindAndSetDim(Express &ex, const std::string &findname);
+    std::vector<std::string> ProcessSymbolicDimensions(const Ort::TypeInfo &type_info);
+    void LogSymbolicDimensions(const std::vector<std::string> &result);
+
+    int FirstDimNameSame();
+    ModelState::ModelType model_type_ = ModelState::ModelType::NONE;
+
     template <typename T>
     bool ContainNegativeOne(const std::vector<T> &output_tensors, size_t index)
     {
@@ -301,6 +333,7 @@ private:
     std::map<std::pair<size_t, size_t>, Express> input_dim_map_output_dim;
     std::vector<std::pair<size_t, size_t>> negativeOne;
     ModelMode model_mode_ = ModelMode::TENSOR_ZERO;
+    int init_thread_tag_ = -1;
 };
 
 template <typename T1, typename T2>

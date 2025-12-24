@@ -175,11 +175,10 @@ int ModelInstanceState::InitDevices(std::vector<int> &dev_ids_)
 int ModelInstanceState::InitGraphSession(int dev_id, int graph_id, aclrtContext context, std::mutex &mu,
                                          ge::Session *session_)
 {
-    aclError retInit;
     ge::Status ret;
     ge::graphStatus graph_ret;
     aclrtStream stream_ = nullptr;
-
+    aclError aclRet;
     aclrtSetCurrentContext(context);
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
                 (std::string("graph_id: ") + std::to_string(graph_id) + std::string("start init")).c_str());
@@ -187,6 +186,29 @@ int ModelInstanceState::InitGraphSession(int dev_id, int graph_id, aclrtContext 
     ge::Graph graph1;
     std::map<ge::AscendString, ge::AscendString> parser_options;
 
+    ConfigureParserOptions(parser_options);
+
+    if (!ParseGraph(graph_id, parser_options, graph1, mu)) {
+        return RET_ERR;
+    }
+
+    if (!AddAndCompileGraph(session_, graph_id, graph1, ret)) {
+        return RET_ERR;
+    }
+
+    if (!CreateAndLoadStream(session_, graph_id, stream_, ret, aclRet)) {
+        return RET_ERR;
+    }
+
+    model_state_->GetScheduler()->AddInstance(graph_id, context, stream_, session_, dev_id);
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
+                (std::string("graph_id: ") + std::to_string(graph_id) + std::string("finished")).c_str());
+
+    return RET_OK;
+}
+
+void ModelInstanceState::ConfigureParserOptions(std::map<ge::AscendString, ge::AscendString> &parser_options)
+{
     if (model_state_->GetGeStaticMode()) {
         if (model_state_->GetInferMode() == ModelState::InferMode::DYNAMICMODEL ||
             model_state_->GetDynamicBatchSupport()) {
@@ -199,37 +221,70 @@ int ModelInstanceState::InitGraphSession(int dev_id, int graph_id, aclrtContext 
     } else {
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "generate dynamic batch graph");
     }
+}
 
+bool ModelInstanceState::ParseGraph(int graph_id, std::map<ge::AscendString, ge::AscendString> &parser_options,
+                                    ge::Graph &graph1, std::mutex &mu)
+{
+    ge::graphStatus graph_ret;
     {
         std::lock_guard<std::mutex> lock(mu);
-        graph_ret = ge::aclgrphParseONNX(model_state_->GetModelPath().c_str(), parser_options, graph1);
-        if (graph_ret != RET_OK) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+        switch (model_state_->GetModelType()) {
+            case ModelState::ModelType::ONNX:
+                graph_ret = ge::aclgrphParseONNX(model_state_->GetModelPath().c_str(), parser_options, graph1);
+                if (graph_ret != RET_OK) {
+                    LOG_MESSAGE(
+                        TRITONSERVER_LOG_ERROR,
                         (std::string("aclgrphParseONNX execute failed, ret is: ") + std::to_string(graph_ret)).c_str());
-            return RET_ERR;
+                    return false;
+                }
+                break;
+            case ModelState::ModelType::TENSORFLOW:
+                graph_ret = ge::aclgrphParseTensorFlow(model_state_->GetModelPath().c_str(), parser_options, graph1);
+                if (graph_ret != RET_OK) {
+                    LOG_MESSAGE(
+                        TRITONSERVER_LOG_ERROR,
+                        (std::string("aclgrphParseTensorFlow execute failed, ret is: ") + std::to_string(graph_ret))
+                            .c_str());
+                    return false;
+                }
+                break;
+            default:
+                TRITONSERVER_Error *error =
+                    TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, "can't find model file in model path!");
+                TRITONSERVER_ErrorDelete(error);
         }
     }
+    return true;
+}
 
+bool ModelInstanceState::AddAndCompileGraph(ge::Session *session_, int graph_id, ge::Graph &graph1, ge::Status &ret)
+{
     ret = session_->AddGraph(graph_id, graph1);
     if (ret != RET_OK) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                    (std::string("session_->AddGraph failed, ret is: ") + std::to_string(graph_ret)).c_str());
-        return RET_ERR;
+                    (std::string("session_->AddGraph failed, ret is: ") + std::to_string(ret)).c_str());
+        return false;
     }
 
     ret = session_->CompileGraph(graph_id);
     if (ret != RET_OK) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("session_->CompileGraph failed, ret is: ") + std::to_string(ret)).c_str());
-        return RET_ERR;
+        return false;
     }
+    return true;
+}
 
+bool ModelInstanceState::CreateAndLoadStream(ge::Session *session_, int graph_id, aclrtStream &stream_, ge::Status &ret,
+                                             aclError &aclRet)
+{
     // 创建一个Stream
-    aclError aclRet = aclrtCreateStream(&stream_);
+    aclRet = aclrtCreateStream(&stream_);
     if (aclRet != ACL_SUCCESS) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("aclrtCreateStream execute failed, code is:") + std::to_string(aclRet)).c_str());
-        return RET_ERR;
+        return false;
     }
 
     std::map<AscendString, AscendString> load_graph_options = {};
@@ -237,14 +292,9 @@ int ModelInstanceState::InitGraphSession(int dev_id, int graph_id, aclrtContext 
     if (ret != RET_OK) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("session_->LoadGraph failed, ret is: ") + std::to_string(ret)).c_str());
-        return RET_ERR;
+        return false;
     }
-
-    model_state_->GetScheduler()->AddInstance(graph_id, context, stream_, session_, dev_id);
-    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                (std::string("graph_id: ") + std::to_string(graph_id) + std::string("finished")).c_str());
-
-    return RET_OK;
+    return true;
 }
 
 // 计算设备执行块数量
@@ -267,67 +317,110 @@ void ModelInstanceState::CreateDeviceThreads(int dev_id, int dev_index, int devi
     options[ge::AscendString("ge.session_device_id")] = ge::AscendString(str.c_str());
     options[ge::AscendString("ge.constLifecycle")] = ge::AscendString("session");
 
+    ConfigureDumpOptions(options);
+
+    aclrtContext context_ = nullptr;
+
+    if (!SetDeviceAndContext(dev_id, context_)) {
+        return;
+    }
+
+    std::vector<ge::Session *> sessions = {};
+    CreateSessions(dev_id, dev_index, device_exec_block, options, sessions);
+
+    CreateThreads(dev_id, dev_index, device_exec_block, mu, context_, sessions, threads);
+}
+
+void ModelInstanceState::ConfigureDumpOptions(std::map<ge::AscendString, ge::AscendString> &options)
+{
     if (model_state_->GetDumpData()) {
         options[ge::AscendString("ge.exec.enableDump")] = ge::AscendString("1");
         options[ge::AscendString("ge.exec.dumpPath")] = ge::AscendString("./dump_data");
         options[ge::AscendString("ge.exec.dumpMode")] = ge::AscendString("all");
     }
+}
 
-    aclrtContext context_ = nullptr;
-
+bool ModelInstanceState::SetDeviceAndContext(int dev_id, aclrtContext &context_)
+{
     aclError retInit = aclrtSetDevice(dev_id);
     if (retInit != ACL_SUCCESS) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("aclrtSetDevice execute failed, code is: ") + std::to_string(retInit)).c_str());
-        return;
+        return false;
     }
 
     aclrtGetCurrentContext(&context_);
-    std::vector<ge::Session *> sessions = {};
-    for (int j = 0; j < device_exec_block; j++) {
-        int graph_id = j + device_exec_block * dev_index;
-        if (!model_state_->GetGeStaticMode()) {
-            ge::Session *session = NULL;
-            session = new Session(options);
-            if (session == nullptr) {
-                LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("Create session failed.")).c_str());
-                return;
-            }
+    return true;
+}
 
-            sessions.push_back(session);
+void ModelInstanceState::CreateSessions(int dev_id, int dev_index, int device_exec_block,
+                                        const std::map<ge::AscendString, ge::AscendString> &options,
+                                        std::vector<ge::Session *> &sessions)
+{
+    for (int j = 0; j < device_exec_block; j++) {
+        int graph_id = j + device_exec_block * dev_index + model_state_->GetInitStatus() * 1000;
+        ge::Session *session = nullptr;
+
+        if (!model_state_->GetGeStaticMode()) {
+            session = new Session(options);
         } else {
             if (j == 0) {
-                ge::Session *session = NULL;
                 session = new Session(options);
-                if (session == nullptr) {
-                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("Create session failed.")).c_str());
-                    return;
-                }
-                sessions.push_back(session);
             } else {
-                sessions.push_back(sessions[0]);
+                session = sessions[0];
             }
         }
-        threads.emplace_back([this, &mu, graph_id, context_, dev_id, options, session = sessions[j]]() {
-            try {
-                int result = InitGraphSession(dev_id, graph_id, context_, mu, session);
-                if (result == RET_ERR) {
-                    init_failed_.store(true);
-                    // 可以记录哪个线程失败
-                    std::lock_guard<std::mutex> lock(exception_mutex_);
-                    if (!init_exception_) {
-                        init_exception_ = std::make_exception_ptr(
-                            std::runtime_error("InitGraphSession failed for graph_id: " + std::to_string(graph_id)));
-                    }
-                }
-            } catch (...) {
-                init_failed_.store(true);
-                std::lock_guard<std::mutex> lock(exception_mutex_);
-                if (!init_exception_) {
-                    init_exception_ = std::current_exception();
-                }
-            }
+
+        if (session == nullptr) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("Create session failed.")).c_str());
+            return;
+        }
+
+        sessions.push_back(session);
+    }
+}
+
+void ModelInstanceState::CreateThreads(int dev_id, int dev_index, int device_exec_block, std::mutex &mu,
+                                       aclrtContext context_, const std::vector<ge::Session *> &sessions,
+                                       std::vector<std::thread> &threads)
+{
+    for (int j = 0; j < device_exec_block; j++) {
+        int graph_id = j + device_exec_block * dev_index;
+        threads.emplace_back([this, &mu, graph_id, context_, dev_id, sessions, j]() {
+            InitializeGraphSession(graph_id, dev_id, context_, mu, sessions[j]);
         });
+    }
+}
+
+void ModelInstanceState::InitializeGraphSession(int graph_id, int dev_id, aclrtContext context_, std::mutex &mu,
+                                                ge::Session *session)
+{
+    try {
+        int result = InitGraphSession(dev_id, graph_id, context_, mu, session);
+        if (result == RET_ERR) {
+            init_failed_.store(true);
+            RecordInitFailure(graph_id);
+        }
+    } catch (...) {
+        init_failed_.store(true);
+        RecordInitException();
+    }
+}
+
+void ModelInstanceState::RecordInitFailure(int graph_id)
+{
+    std::lock_guard<std::mutex> lock(exception_mutex_);
+    if (!init_exception_) {
+        init_exception_ = std::make_exception_ptr(
+            std::runtime_error("InitGraphSession failed for graph_id: " + std::to_string(graph_id)));
+    }
+}
+
+void ModelInstanceState::RecordInitException()
+{
+    std::lock_guard<std::mutex> lock(exception_mutex_);
+    if (!init_exception_) {
+        init_exception_ = std::current_exception();
     }
 }
 
@@ -345,49 +438,90 @@ int ModelInstanceState::Init()
 {
     // 使用静态 thread_local 变量，确保只初始化一次
     thread_id_ = next_id.fetch_add(1);
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("ModelName: ") + model_state_->GetModelName()).c_str());
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
                 (std::string("Thread initializing... : thread id ") + std::to_string(thread_id_)).c_str());
 
-    if (thread_id_ == 0) {
-        if (InitGEEnvironment() != RET_OK) {
-            return RET_ERR;
-        }
-
-        std::vector<int> dev_ids_ = model_state_->GetDeviceIds();
-        if (InitDevices(dev_ids_) != RET_OK) {
-            return RET_ERR;
-        }
-
-        int device_exec_block_ = CalculateDeviceExecBlock(dev_ids_.size());
-        LOG_MESSAGE(TRITONSERVER_LOG_INFO,
-                    (std::string("final device exec block count: ") + std::to_string(device_exec_block_)).c_str());
-
-        std::vector<std::thread> threads;
-        std::mutex mu;
-
-        for (int i = 0; i < dev_ids_.size(); i++) {
-            CreateDeviceThreads(dev_ids_[i], i, device_exec_block_, threads, mu);
-        }
-
-        // 等待所有线程完成
-        JoinAllThreads(threads);
-        // 检查是否有初始化失败
-        if (init_failed_.load()) {
-            if (init_exception_) {
-                try {
-                    std::rethrow_exception(init_exception_);
-                } catch (const std::exception &e) {
-                    std::cerr << "Init failed with exception: " << e.what() << std::endl;
-                }
-            }
-            return RET_ERR;
-        }
-        // 启动调度器的批次处理线程
-        inference_->Start();
-        return RET_OK;
+    if (model_state_->GetInitStatus() == -1) {
+        return InitializeGlobalResources();
     }
 
     return RET_OK;
+}
+
+int ModelInstanceState::InitializeGlobalResources()
+{
+    // 模型第一个 instance ,需要负责初始化
+    // 将抢到的id作为标记存入模型中
+    int lock = lock_id.fetch_add(1);
+    model_state_->SetInitStatus(lock);
+    // 整个模型中第一个抢到 1 的需要初始化模型
+    if (lock == 0) {
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("ModelName: ") + model_state_->GetModelName() +
+                                               std::string(" start init env , lock_id : ") + std::to_string(lock))
+                                                  .c_str());
+        if (InitGEEnvironment() != RET_OK) {
+            return RET_ERR;
+        }
+    } else {
+        while (1) {
+            // 按照取号顺序等待
+            if (notify_id.load() == lock) {
+                break;
+            }
+            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("ModelName: ") + model_state_->GetModelName() +
+                                                   std::string(" wait , lock_id : ") + std::to_string(lock))
+                                                      .c_str());
+            sleep(1);
+        }
+    }
+
+    std::vector<int> dev_ids_ = model_state_->GetDeviceIds();
+    if (InitDevices(dev_ids_) != RET_OK) {
+        return RET_ERR;
+    }
+
+    return InitializeDeviceThreads(dev_ids_, lock);
+}
+
+int ModelInstanceState::InitializeDeviceThreads(const std::vector<int> &dev_ids_, int lock)
+{
+    int device_exec_block_ = CalculateDeviceExecBlock(dev_ids_.size());
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO,
+                (std::string("final device exec block count: ") + std::to_string(device_exec_block_)).c_str());
+
+    std::vector<std::thread> threads;
+    std::mutex mu;
+
+    for (int i = 0; i < dev_ids_.size(); i++) {
+        CreateDeviceThreads(dev_ids_[i], i, device_exec_block_, threads, mu);
+    }
+
+    // 等待所有线程完成
+    JoinAllThreads(threads);
+
+    // 检查是否有初始化失败
+    if (init_failed_.load()) {
+        HandleInitFailure();
+        return RET_ERR;
+    }
+
+    // 启动调度器的批次处理线程
+    inference_->Start();
+    // 解锁其余模型
+    notify_id.store(lock + 1);
+    return RET_OK;
+}
+
+void ModelInstanceState::HandleInitFailure()
+{
+    if (init_exception_) {
+        try {
+            std::rethrow_exception(init_exception_);
+        } catch (const std::exception &e) {
+            std::cerr << "Init failed with exception: " << e.what() << std::endl;
+        }
+    }
 }
 
 TRITONSERVER_Error *ModelInstanceState::Create(ModelState *model_state,
