@@ -265,15 +265,12 @@ TRITONSERVER_Error *ModelState::ParseModelConfig()
 {
     common::TritonJson::Value inputs;
     common::TritonJson::Value outputs;
-
-    RETURN_IF_ERROR(model_config_.MemberAsArray("input", &inputs));
-    RETURN_IF_ERROR(model_config_.MemberAsArray("output", &outputs));
-    RETURN_IF_ERROR(model_config_.MemberAsString("name", &model_name_));
-
-    RETURN_IF_ERROR(ParseInputTensors(inputs));
-    RETURN_IF_ERROR(ParseOutputTensors(outputs));
-    RETURN_IF_ERROR(ParseDynamicBatching());
-
+    model_config_.MemberAsArray("input", &inputs);
+    model_config_.MemberAsArray("output", &outputs);
+    model_config_.MemberAsString("name", &model_name_);
+    ParseInputTensors(inputs);
+    ParseOutputTensors(outputs);
+    ParseDynamicBatching();
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("max_batch_size ") + std::to_string(MaxBatchSize())).c_str());
 
     return nullptr;

@@ -528,14 +528,11 @@ TRITONSERVER_Error *ModelInstanceState::Create(ModelState *model_state,
                                                TRITONBACKEND_ModelInstance *triton_model_instance,
                                                ModelInstanceState **state)
 {
-    try {
-        *state = new ModelInstanceState(model_state, triton_model_instance);
-    } catch (const BackendModelInstanceException &ex) {
-        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN, "unexpected nullptr in BackendModelInstanceException");
-    }
-    int ret = (*state)->Init();
-    if (ret != RET_OK) {
-        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN, "init instance error");
+    
+    *state = new ModelInstanceState(model_state, triton_model_instance);
+    if ((*state)->Init() != RET_OK) {
+        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN, 
+            "init instance error, please check log for more info.");
     }
     return nullptr;  // success
 }
