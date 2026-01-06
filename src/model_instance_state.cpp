@@ -260,7 +260,11 @@ bool ModelInstanceState::ParseGraph(int graph_id, std::map<ge::AscendString, ge:
 
 bool ModelInstanceState::AddAndCompileGraph(ge::Session *session_, int graph_id, ge::Graph &graph1, ge::Status &ret)
 {
-    ret = session_->AddGraph(graph_id, graph1);
+    std::map<std::string, std::string> options;
+    if (model_state_->GetGeOption().find("graph") != model_state_->GetGeOption().end()) {
+        options = model_state_->GetGeOption()["graph"];
+    }
+    ret = session_->AddGraph(graph_id, graph1, options);
     if (ret != RET_OK) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("session_->AddGraph failed, ret is: ") + std::to_string(ret)).c_str());
@@ -308,6 +312,18 @@ int ModelInstanceState::CalculateDeviceExecBlock(int device_count)
     return device_exec_block;
 }
 
+void ModelInstanceState::ConfigureGeOptions(std::map<ge::AscendString, ge::AscendString> &options)
+{
+    std::map<std::string, std::string> m1;
+    if (model_state_->GetGeOption().find("session") != model_state_->GetGeOption().end()) {
+        m1 = model_state_->GetGeOption()["session"];
+    }
+    for (auto &pair : m1) {
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, ("Pair: " + pair.first + " " + pair.second).c_str());
+        options[ge::AscendString(pair.first.c_str())] = ge::AscendString(pair.second.c_str());
+    }
+}
+
 // 创建设备线程
 void ModelInstanceState::CreateDeviceThreads(int dev_id, int dev_index, int device_exec_block,
                                              std::vector<std::thread> &threads, std::mutex &mu)
@@ -316,6 +332,7 @@ void ModelInstanceState::CreateDeviceThreads(int dev_id, int dev_index, int devi
     std::string str = std::to_string(dev_id);
     options[ge::AscendString("ge.session_device_id")] = ge::AscendString(str.c_str());
     options[ge::AscendString("ge.constLifecycle")] = ge::AscendString("session");
+    ConfigureGeOptions(options);
 
     ConfigureDumpOptions(options);
 
@@ -529,7 +546,7 @@ TRITONSERVER_Error *ModelInstanceState::Create(ModelState *model_state,
                                                ModelInstanceState **state)
 {
     
-    *state = new ModelInstanceState(model_state, triton_model_instance);
+        *state = new ModelInstanceState(model_state, triton_model_instance);
     if ((*state)->Init() != RET_OK) {
         return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN, 
             "init instance error, please check log for more info.");

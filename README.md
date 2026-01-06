@@ -1,6 +1,12 @@
 # README
 
-## 新版本特性 v2.2.0
+## 新版本特性 v2.3.0
+1. 支持对全局、session、graph 的options进行添加，从而进一步调优模型，相关案例请参考 [性能调优方法论](#性能调优方法论)。   
+2. 支持采用分档模式将符合条件模型转化为静态图，提高吞吐性能。
+3. 补充如何采用分档模式+锁核+调整精度，进一步提高性能。
+* 在AscendHub下载镜像时需确认好版本，若使用旧版本镜像，需要手工下载源码编译生成新的backend后才能支持新特性。
+
+## 版本特性 v2.2.0
 1. 支持从onnx文件读取模型输入输出信息, config中若无指定input，output，将会自动从文件中读取；   
 2. 调整动态图在多实例下使用多Session方式，提高并发吞吐(显存占用会增高)；
 3. 支持动态batch场景小batch动态合并特性，配合多Session，提高吞吐；
@@ -264,7 +270,7 @@ parameters: [
 --backend-config=npu_ge,static_model 是否开启ge静态图，只有在shape全部为固定值时才能开启，config.pbtxt 也可以配置，只需配置一个。默认不开启。   
 --backend-config=npu_ge,profiling 是否开启profiling，若为ture，则采用静态采集，程序运行后立刻开始，若为dynamic，则需要使用另一线程，具体可参考昇腾文档。 开启后会在当前目录下生成profiling文件夹。默认关闭。  
 --backend-config=npu_ge,dump_graph 是否dump GE图，默认关闭。   
-<font color="#dd0000"> 注意：ge.xxx 相关的参数可直接通过在运行后缀中加入--backend-config=npu_ge,ge.xxx="yyy" 使能该参数生效</font>
+<font color="#dd0000"> 注意：ge参数分全局、session、graph 参数，当直接填写ge.xxx 时会被作为全局参数；当添加 session.ge.xxx 或 graph.ge.xxx 是会分别被作为 session、graph 参数。具体支持哪些参数请参考 [Ascend Graph构图接口 options参数说明](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/API/ascendgraphapi/atlasgeapi_07_0150.html#ZH-CN_TOPIC_0000002370141369__section1179795275614) 。   </font>
 
 启动完成后，在输出中可看到相应的 http端口信息。
 ```

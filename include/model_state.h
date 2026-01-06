@@ -216,6 +216,10 @@ public:
         return dynamic_batching_;
     }
     std::string ProcessEntry(const std::filesystem::directory_entry &entry, const std::string &extension);
+    std::map<std::string, std::map<std::string, std::string>> GetGeOption()
+    {
+        return geOption_;
+    }
 
 private:
     // 私有辅助方法
@@ -334,6 +338,11 @@ private:
     std::vector<std::pair<size_t, size_t>> negativeOne;
     ModelMode model_mode_ = ModelMode::TENSOR_ZERO;
     int init_thread_tag_ = -1;
+
+    std::map<std::string, std::map<std::string, std::string>> geOption_;
+
+    void SetOptions(std::string key, std::string value);
+    void PrintGeOptions();
 };
 
 template <typename T1, typename T2>
