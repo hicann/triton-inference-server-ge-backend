@@ -77,6 +77,7 @@ public:
     int InitializeDeviceThreads(const std::vector<int> &dev_ids_, int lock);
     void HandleInitFailure();
     void InitializeGraphSession(int graph_id, int dev_id, aclrtContext context_, std::mutex &mu, ge::Session *session);
+    void ConfigureGeOptions(std::map<ge::AscendString, ge::AscendString> &options);
 
 private:
     // 初始化相关方法

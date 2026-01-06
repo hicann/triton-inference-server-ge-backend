@@ -113,7 +113,7 @@ void ModelState::SetProfiling(const std::string &type = "true", const std::strin
         setenv("PROFILING_OPTIONS", profiling_options.c_str(), 1);
     }
     pid_t pid = getpid();  // 获取当前进程ID，返回值为 pid_t 类型
-    LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("当前进程ID: ") + std::to_string(pid)).c_str());
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, (std::string("Current Process ID: ") + std::to_string(pid)).c_str());
 }
 
 // 解析GE配置
@@ -134,11 +134,23 @@ void ModelState::ParseGeConfig(const std::string &json_str)
     }
 }
 
+void ModelState::SetOptions(std::string key, std::string value)
+{
+    vector<string> options = {"global.", "session.", "graph."};
+    for (auto &option : options) {
+        if (key.find(option) != std::string::npos) {
+            string front = key.substr(0, option.size() - 1);
+            string back = key.substr(option.size());
+            geOption_[front][back] = value;
+        }
+    }
+}
+
 // 解析命令行配置
 void ModelState::ParseCmdlineConfig(const json &cmdline, const std::vector<std::string> &npu_ge_config)
 {
     std::string ge_pre = "ge.";
-    for (const auto &[key, value] : cmdline.items()) {
+    for (auto &[key, value] : cmdline.items()) {
         if (key.size() >= ge_pre.size() && key.substr(0, ge_pre.size()) == ge_pre && value.is_string()) {
             LOG_MESSAGE(TRITONSERVER_LOG_INFO,
                         (std::string("ge config ") + "key:" + key + " value: " + value.get<string>()).c_str());
@@ -162,6 +174,7 @@ void ModelState::ParseCmdlineConfig(const json &cmdline, const std::vector<std::
                 SetProfiling(value.get<string>(), "./profiling", "PipeUtilization");
             }
         }
+        SetOptions(key, value.get<string>());
     }
 }
 
@@ -415,6 +428,21 @@ void ModelState::ParseModelParametersConfig()
     }
 }
 
+void ModelState::PrintGeOptions()
+{
+    for (const auto &outer_pair : geOption_) {
+        const std::string &outer_key = outer_pair.first;
+        const std::map<std::string, std::string> &inner_map = outer_pair.second;
+        for (const auto &inner_pair : inner_map) {
+            const std::string &inner_key = inner_pair.first;
+            const std::string &output_value = inner_pair.second;
+            // 使用 LOG_MESSAGE 打印日志
+            LOG_MESSAGE(TRITONSERVER_LOG_INFO,
+                        (std::string("options ") + outer_key + "." + inner_key + " " + output_value).c_str());
+        }
+    }
+}
+
 // 解析参数值（字符串类型）
 void ModelState::ParseParameterValue(common::TritonJson::Value &params, const std::string &key,
                                      std::string &output_value, std::vector<int> &output_ids)
@@ -635,6 +663,9 @@ ModelState::ModelState(TRITONBACKEND_Model *triton_model) : BackendModel(triton_
     FindModelFile();
     DetermineInferMode();
     ParseOnnxInfo();
+    if (model_type_ == ModelState::ModelType::ONNX) {
+        ParseOnnxInfo();
+    }
     SetModelMode();
 }
 
@@ -900,10 +931,11 @@ TRITONSERVER_Error *ModelState::InputdimToOutputdimMap(ModelState **state)
 void ModelState::ChangeOutputdim()
 {
     int index = 0;
-    int modelmode = static_cast<int>(GetModelNode());
-    if (modelmode == 2 ||
+    ModelState::ModelMode modelmode = GetModelNode();
+    if (modelmode == ModelMode::NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE ||
         modelmode ==
-            3) {  // 2 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE 3 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM
+            ModelMode::
+                NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {  // 2 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE 3 NO_MAX_BATCH_FIRST_SAME_NOT_NEGATIVE_ONE_HAVE_UNKNOW_DIM
         index = 1;
     }
     for (size_t i = 0; i < output_client_tensor_.size(); i++) {
@@ -997,6 +1029,26 @@ TRITONSERVER_Error *ModelState::Create(TRITONBACKEND_Model *triton_model, ModelS
     }
     RETURN_IF_ERROR((*state)->CheckModelMode());
 
+    triton::common::TritonJson::Value parameters;
+    (*state)->ModelConfig().Find("parameters", &parameters);
+    vector<string> member_names;
+    TRITONJSON_STATUSTYPE status = parameters.Members(&member_names);
+    if (status != TRITONJSON_STATUSSUCCESS) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "Failed to obtain JSON object member name");
+    }
+
+    for (size_t i = 0; i < member_names.size(); i++) {
+        LOG_MESSAGE(TRITONSERVER_LOG_INFO, ("Member name: " + member_names[i]).c_str());
+        string tmp_str;
+        TRITONSERVER_Error *error = GetParameterValue(parameters, member_names[i], &tmp_str);
+        LOG_MESSAGE(TRITONSERVER_LOG_INFO, ("Member value: " + tmp_str).c_str());
+        if (error == nullptr) {
+            (*state)->SetOptions(member_names[i], tmp_str);
+        } else {
+            TRITONSERVER_ErrorDelete(error);
+        }
+    }
+
     // 提前将模型的配置的输出维度配置好
     // 1. MAX_BATCH [512] 按照模型解析出来的记录
     // 2. MAX_BATCH_HAVE_UNKNOW_DIM [-1] 需要建立映射 map<pair<int, int>, structmapoutput>
@@ -1021,6 +1073,7 @@ TRITONSERVER_Error *ModelState::Create(TRITONBACKEND_Model *triton_model, ModelS
     }
     (*state)->CheckDynamicBatch();
     (*state)->PrintModelConfig();
+    (*state)->PrintGeOptions();
     RETURN_IF_ERROR((*state)->InputdimToOutputdimMap(state));
 
     return nullptr;  // success
@@ -1226,13 +1279,13 @@ TRITONSERVER_Error *ModelState::AutoCompleteConfig()
     }
 
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "Start AutoCompleteConfig!");
-    int modelmode = static_cast<int>(GetModelNode());
+    ModelState::ModelMode modelmode = GetModelNode();
     if (input_count_ == 0) {
         RETURN_IF_ERROR(AutoCompleteIO("input", input_onnx_tensor_));
         input_client_tensor_ = input_onnx_tensor_;
         input_count_ = input_onnx_tensor_.size();
 
-        if (modelmode == 0 || modelmode == 1) {
+        if (modelmode == ModelMode::MAX_BATCH || modelmode == ModelMode::MAX_BATCH_HAVE_UNKNOW_DIM) {
             for (size_t i = 0; i < input_count_; i++) {
                 input_client_tensor_[i].dims_.erase(input_client_tensor_[i].dims_.begin());
             }
@@ -1243,7 +1296,7 @@ TRITONSERVER_Error *ModelState::AutoCompleteConfig()
         RETURN_IF_ERROR(AutoCompleteIO("output", output_onnx_tensor_));
         output_client_tensor_ = output_onnx_tensor_;
         output_count_ = output_onnx_tensor_.size();
-        if (modelmode == 0 || modelmode == 1) {
+        if (modelmode == ModelMode::MAX_BATCH || modelmode == ModelMode::MAX_BATCH_HAVE_UNKNOW_DIM) {
             for (size_t i = 0; i < output_count_; i++) {
                 output_client_tensor_[i].dims_.erase(output_client_tensor_[i].dims_.begin());
             }
