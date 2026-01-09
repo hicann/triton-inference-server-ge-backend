@@ -75,8 +75,7 @@ public:
                                std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
                                const std::vector<int> &input_offset, const std::vector<int> &batch_result);
 
-    int PrepareInputTensors(Scheduler::Instance *instance, std::vector<void *> &inhost_buffer_,
-                            std::vector<int> &inhost_line_size_, int exec_batch, int instance_index,
+    int PrepareInputTensors(std::vector<int> &inhost_line_size_, int exec_batch, int instance_index,
                             std::vector<void *> &indev_buffer_, std::vector<gert::Tensor> &inputs);
 
     int BuildInputTensor(size_t input_index, int exec_batch, void *dev_buffer, gert::Tensor &tensor);
@@ -142,26 +141,24 @@ public:
     int EvaluatePostfix(std::vector<std::string> &postfix);
     void PrintOutputDimensions();
     void ProcessMapEntries(std::map<std::pair<size_t, size_t>, triton::backend::npu_ge::ModelState::Express> &m1);
-    void ProcessValuesWithBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1,
-                                      std::pair<size_t, size_t> &index);
-    void ProcessValuesWithoutBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1,
-                                         std::pair<size_t, size_t> &index);
-    void LogResult(std::pair<size_t, size_t> &index, std::string &expressName);
+    void ProcessValuesWithBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1);
+    void ProcessValuesWithoutBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1);
+    void LogResult(std::pair<size_t, size_t> &index);
     bool CanCombine(ModelState *model_state);
-    void AllocateCombinedMemory(ModelState *model_state, std::vector<void *> &inhost_buffer_,
-                                std::vector<int> &inhost_line_size_, int batch_total);
-    void AllocateSingleMemory(ModelState *model_state, size_t j, std::vector<void *> &inhost_buffer_,
-                              std::vector<int> &inhost_line_size_, const int64_t *shape, uint32_t dims_count,
-                              const void *buffer, uint64_t buffer_size);
+    int AllocateCombinedMemory(ModelState *model_state, std::vector<void *> &inhost_buffer_,
+                               std::vector<int> &inhost_line_size_, int batch_total);
+    int AllocateSingleMemory(ModelState *model_state, size_t j, std::vector<void *> &inhost_buffer_,
+                             std::vector<int> &inhost_line_size_, const int64_t *shape, uint32_t dims_count,
+                             const void *buffer, uint64_t buffer_size);
     int ProcessInputBuffers(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
                             std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
                             std::vector<int> &input_offset);
-    void ProcessRequestInputs(TRITONBACKEND_Request *request, size_t request_index, std::vector<int> &batch_result,
-                              std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                              std::vector<int> &input_offset);
-    void ProcessInputBuffer(TRITONBACKEND_Input *input, size_t input_index, size_t request_index,
-                            std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
-                            std::vector<int> &inhost_line_size_, std::vector<int> &input_offset);
+    int ProcessRequestInputs(TRITONBACKEND_Request *request, size_t request_index, std::vector<int> &batch_result,
+                             std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
+                             std::vector<int> &input_offset);
+    int ProcessInputBuffer(TRITONBACKEND_Input *input, size_t input_index, size_t request_index,
+                           std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
+                           std::vector<int> &inhost_line_size_, std::vector<int> &input_offset);
     void ProcessFormulaCharacters(std::string &formula, std::stack<char> &opStack, std::vector<std::string> &output,
                                   std::string &currentNumber);
     void ProcessCurrentNumber(std::string &currentNumber, std::vector<std::string> &output);

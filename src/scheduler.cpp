@@ -13,7 +13,7 @@ Scheduler::Scheduler() {}
 void Scheduler::PrintInstances()
 {
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, "instance info:");
-    for (int i = 0; i < instances.size(); i++) {
+    for (size_t i = 0; i < instances.size(); i++) {
         std::string result = " index: " + std::to_string(instances[i].index) +
                              " context: " + std::to_string((long long int)(instances[i].context)) +
                              " stream: " + std::to_string((long long int)(instances[i].stream)) +
@@ -187,7 +187,7 @@ void Scheduler::WaitForIdleInstances(int required_num, std::unique_lock<std::mut
 }
 
 // 简单选择策略（不进行负载均衡）
-std::vector<Scheduler::Instance *> Scheduler::SelectInstancesSimple(aclrtContext now_context, int num)
+std::vector<Scheduler::Instance *> Scheduler::SelectInstancesSimple(aclrtContext now_context, size_t num)
 {
     std::vector<Scheduler::Instance *> selected_instances;
 
@@ -214,7 +214,7 @@ std::vector<Scheduler::Instance *> Scheduler::SelectInstancesSimple(aclrtContext
 }
 
 // 使用负载均衡策略选择实例
-std::vector<Scheduler::Instance *> Scheduler::SelectInstancesWithLoadBalance(aclrtContext now_context, int num)
+std::vector<Scheduler::Instance *> Scheduler::SelectInstancesWithLoadBalance(aclrtContext now_context, size_t num)
 {
     auto group_loads = CalculateGroupLoads();
     auto idle_instances_by_group = CollectIdleInstancesByGroup();
@@ -244,7 +244,7 @@ std::vector<Scheduler::Instance *> Scheduler::SelectInstancesWithLoadBalance(acl
 }
 
 // 获取空闲 instances - 自动更新状态和任务计数
-std::vector<Scheduler::Instance *> Scheduler::GetIdleInstances(aclrtContext now_context, int num, bool is_lb)
+std::vector<Scheduler::Instance *> Scheduler::GetIdleInstances(aclrtContext now_context, int num)
 {
     std::unique_lock<std::mutex> lock(mutex);
 
@@ -304,21 +304,6 @@ int Scheduler::GetRunningCount(int group_id)
 // 析构函数 - 释放资源
 Scheduler::~Scheduler()
 {
-    std::lock_guard<std::mutex> lock(mutex);
-
-    for (auto &instance : instances) {
-        if (instance.session != nullptr) {
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, " delete session_");
-            delete instance.session;
-        }
-        if (instance.stream != nullptr) {
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, " delete stream_");
-            aclrtDestroyStreamForce(instance.stream);
-        }
-    }
-
-    // 通知所有等待的线程，防止死锁
-    cv.notify_all();
 }
 }
 }

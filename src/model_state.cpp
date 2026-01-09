@@ -70,6 +70,7 @@ void ModelState::SetDumpGraph(const std::string &path)
     if (path.empty() || path.find(";") != std::string::npos || path.find("&") != std::string::npos ||
         path.find("|") != std::string::npos) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "Error: Path contains unsafe characters or is empty");
+        return;
     }
     // Set graph dump path
     setenv("DUMP_GRAPH_PATH", path.c_str(), 1);
@@ -488,9 +489,13 @@ void ModelState::FindModelFile()
         model_type_ = ModelState::ModelType::TENSORFLOW;
         return;
     }
+
     TRITONSERVER_Error *error =
         TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, "can't find model file in model path!");
     TRITONSERVER_ErrorDelete(error);
+    if (model_file_ == "") {
+        throw std::runtime_error("Model file not found: dir path " + std::string(runtime_modeldir_));
+    }
 }
 
 // 确定推理模式
@@ -590,7 +595,7 @@ int ModelState::FirstDimNameSame()
 {
     if (input_onnx_tensor_.size() > 0 && output_onnx_tensor_.size() > 0) {
         string compare = input_onnx_tensor_[0].dim_name_[0];
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("compare") + compare).c_str());
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("compare ") + compare).c_str());
         int flag = 0;
         for (size_t i = 0; i < input_onnx_tensor_.size(); i++) {
             LOG_MESSAGE(
@@ -651,6 +656,25 @@ void ModelState::SetModelMode()
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("Current mode ") + PrintModelMode(model_mode_)).c_str());
 }
 
+void ModelState::ResetStaticMode()
+{
+    if (!(MaxBatchSize() > 0)) {
+        if (input_client_tensor_.size() > 0 && output_client_tensor_.size() > 0) {
+            if (!ContainNegativeOne(input_client_tensor_, 0) && !ContainNegativeOne(output_client_tensor_, 0)) {
+                SetGeStaticMode(true);
+                return;
+            }
+        }
+
+        if (input_onnx_tensor_.size() > 0 && output_onnx_tensor_.size() > 0) {
+            if (!ContainNegativeOne(input_onnx_tensor_, 0) && !ContainNegativeOne(output_onnx_tensor_, 0)) {
+                SetGeStaticMode(true);
+                return;
+            }
+        }
+    }
+}
+
 ModelState::ModelState(TRITONBACKEND_Model *triton_model) : BackendModel(triton_model), scheduler_()
 {
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("ModelState ::::::  start")).c_str());
@@ -662,11 +686,11 @@ ModelState::ModelState(TRITONBACKEND_Model *triton_model) : BackendModel(triton_
     ParseModelParametersConfig();
     FindModelFile();
     DetermineInferMode();
-    ParseOnnxInfo();
     if (model_type_ == ModelState::ModelType::ONNX) {
         ParseOnnxInfo();
     }
     SetModelMode();
+    ResetStaticMode();
 }
 
 // 检查是否为文件并返回路径
@@ -834,21 +858,17 @@ TRITONSERVER_Error *ModelState::FindAndSetDim(Express &ex, const string &findnam
 
 void ModelState::LogInputDimMapOutputDim()
 {
-    for (const auto &[input_tensor_dim, express] : input_dim_map_output_dim) {
+    for (const auto &[output_tensor_dim, express] : input_dim_map_output_dim) {
         // Output input dimension and corresponding expression information
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "----------------------------------------");
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                    (std::string("Input mapping: Tensor ") + std::to_string(input_tensor_dim.first) + " dimension " +
-                     std::to_string(input_tensor_dim.second) + " -> Expression: " + express.expressName)
+                    (std::string("Output mapping: Tensor ") + std::to_string(output_tensor_dim.first) + " dimension " +
+                     std::to_string(output_tensor_dim.second) + " -> Expression: " + express.expressName)
                         .c_str());
-
-        // Output dimension mapping of each tensor in the expression
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                    (std::string("  Tensor dimension mapping in expression '") + express.expressName + "':").c_str());
-
         for (const auto &[tensor_name, tensor_dim] : express.dimMap) {
             LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                        (std::string("    Tensor '") + tensor_name + "' -> Tensor " + std::to_string(tensor_dim.first) +
-                         " dimension " + std::to_string(tensor_dim.second))
+                        (std::string("    Tensor '") + tensor_name + "' ->input Tensor " +
+                         std::to_string(tensor_dim.first) + " dimension " + std::to_string(tensor_dim.second))
                             .c_str());
         }
 
@@ -1019,13 +1039,19 @@ std::string ModelState::PrintModelMode(ModelState::ModelMode mode)
 
 TRITONSERVER_Error *ModelState::Create(TRITONBACKEND_Model *triton_model, ModelState **state)
 {
-    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("Create MindIE ModelState:")).c_str());
     try {
         *state = new ModelState(triton_model);
     } catch (const BackendModelException &ex) {
         RETURN_ERROR_IF_TRUE(ex.err_ == nullptr, TRITONSERVER_ERROR_INTERNAL,
                              std::string("unexpected nullptr in BackendModelException"));
         RETURN_IF_ERROR(ex.err_);
+    } catch (const std::exception &ex) {
+        // 这里可以捕获所有继承自 std::exception 的异常
+        RETURN_ERROR_IF_TRUE(true, TRITONSERVER_ERROR_INTERNAL,
+                             std::string("Failed to create model state: ") + ex.what());
+    } catch (...) {
+        RETURN_ERROR_IF_TRUE(true, TRITONSERVER_ERROR_INTERNAL,
+                             std::string("Failed to create model state due to unknown non-standard exception."));
     }
     RETURN_IF_ERROR((*state)->CheckModelMode());
 
@@ -1114,16 +1140,16 @@ std::vector<std::string> ModelState::ProcessSymbolicDimensions(const Ort::TypeIn
 void ModelState::LogSymbolicDimensions(const std::vector<std::string> &result)
 {
     if (!result.empty()) {
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("  Symbolic dimensions: ")).c_str());
+        std::string dimensions = "Dimension: ";
         for (size_t j = 0; j < result.size(); j++) {
             if (j > 0) {
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string(", ")).c_str());
+                dimensions += ", ";
             }
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE,
-                        (std::string("Dimension") + std::to_string(j) + ": '" + result[j] + "'").c_str());
+            dimensions += result[j];
         }
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, dimensions.c_str());
     } else {
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("  No symbolic dimension information")).c_str());
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("No symbolic dimension information")).c_str());
     }
 }
 bool ModelState::FindMapResult(std::string &name, std::tuple<size_t, size_t, std::string> &t1)
@@ -1176,6 +1202,7 @@ void ModelState::ParseOnnxInfo()
 
         // 获取数据形状
         input_onnx_tensor_[i].dims_ = tensor_info.GetShape();
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, ("Input tensor" + to_string(i) + " Dimension info: ").c_str());
         input_onnx_tensor_[i].dim_name_ = GetOnnxSymbolicDimension(type_info);
     }
 
@@ -1191,6 +1218,7 @@ void ModelState::ParseOnnxInfo()
 
         // 获取数据形状
         output_onnx_tensor_[i].dims_ = tensor_info.GetShape();
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, ("Output tensor" + to_string(i) + " Dimension info: ").c_str());
         output_onnx_tensor_[i].dim_name_ = GetOnnxSymbolicDimension(type_info);
     }
 }

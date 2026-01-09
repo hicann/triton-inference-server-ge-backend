@@ -67,7 +67,7 @@ public:
 
     struct Express {
         std::string expressName;                                  // 表达式
-        std::map<std::string, std::pair<size_t, size_t>> dimMap;  // 表达式中张量  第几张量第几维度索引
+        std::map<std::string, std::pair<size_t, size_t>> dimMap;  // 表达式中张量  第几输入张量第几维度索引
     };
 
     void SetModelMode();
@@ -221,6 +221,8 @@ public:
         return geOption_;
     }
 
+    void ResetStaticMode();
+
 private:
     // 私有辅助方法
     void ParseCmdlineConfig(const nlohmann::json &cmdline, const std::vector<std::string> &npu_ge_config);
@@ -334,7 +336,8 @@ private:
         }
         return flag;
     }
-    std::map<std::pair<size_t, size_t>, Express> input_dim_map_output_dim;
+    std::map<std::pair<size_t, size_t>, Express>
+        input_dim_map_output_dim;  // key: 输出张量<第几个张量索引，张量第几维度索引> value: 计算输出维度值所需Express
     std::vector<std::pair<size_t, size_t>> negativeOne;
     ModelMode model_mode_ = ModelMode::TENSOR_ZERO;
     int init_thread_tag_ = -1;

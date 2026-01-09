@@ -59,14 +59,13 @@ public:
     static void LoadGeConfig(std::string &env_value, std::map<ge::AscendString, ge::AscendString> &configMap);
 
     void ConfigureParserOptions(std::map<ge::AscendString, ge::AscendString> &parser_options);
-    bool ParseGraph(int graph_id, std::map<ge::AscendString, ge::AscendString> &parser_options, ge::Graph &graph1,
-                    std::mutex &mu);
+    bool ParseGraph(std::map<ge::AscendString, ge::AscendString> &parser_options, ge::Graph &graph1, std::mutex &mu);
     bool AddAndCompileGraph(ge::Session *session_, int graph_id, ge::Graph &graph1, ge::Status &ret);
     bool CreateAndLoadStream(ge::Session *session_, int graph_id, aclrtStream &stream_, ge::Status &ret,
                              aclError &aclRet);
     void ConfigureDumpOptions(std::map<ge::AscendString, ge::AscendString> &options);
     bool SetDeviceAndContext(int dev_id, aclrtContext &context_);
-    void CreateSessions(int dev_id, int dev_index, int device_exec_block,
+    void CreateSessions(int dev_index, int device_exec_block,
                         const std::map<ge::AscendString, ge::AscendString> &options,
                         std::vector<ge::Session *> &sessions);
     void CreateThreads(int dev_id, int dev_index, int device_exec_block, std::mutex &mu, aclrtContext context_,
