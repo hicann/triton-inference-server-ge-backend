@@ -159,7 +159,7 @@ int ModelInstanceState::InitDevices(std::vector<int> &dev_ids_)
         LOG_MESSAGE(TRITONSERVER_LOG_INFO,
                     (std::string("aclrtGetDeviceCount getDevice count: ") + std::to_string(dev_count)).c_str());
         LOG_MESSAGE(TRITONSERVER_LOG_INFO, "user not set dev_ids ,use all npu card");
-        for (int i = 0; i < dev_count; i++) {
+        for (uint32_t i = 0; i < dev_count; i++) {
             dev_ids_.push_back(i);
         }
     }
@@ -176,7 +176,6 @@ int ModelInstanceState::InitGraphSession(int dev_id, int graph_id, aclrtContext 
                                          ge::Session *session_)
 {
     ge::Status ret;
-    ge::graphStatus graph_ret;
     aclrtStream stream_ = nullptr;
     aclError aclRet;
     aclrtSetCurrentContext(context);
@@ -188,7 +187,7 @@ int ModelInstanceState::InitGraphSession(int dev_id, int graph_id, aclrtContext 
 
     ConfigureParserOptions(parser_options);
 
-    if (!ParseGraph(graph_id, parser_options, graph1, mu)) {
+    if (!ParseGraph(parser_options, graph1, mu)) {
         return RET_ERR;
     }
 
@@ -223,8 +222,8 @@ void ModelInstanceState::ConfigureParserOptions(std::map<ge::AscendString, ge::A
     }
 }
 
-bool ModelInstanceState::ParseGraph(int graph_id, std::map<ge::AscendString, ge::AscendString> &parser_options,
-                                    ge::Graph &graph1, std::mutex &mu)
+bool ModelInstanceState::ParseGraph(std::map<ge::AscendString, ge::AscendString> &parser_options, ge::Graph &graph1,
+                                    std::mutex &mu)
 {
     ge::graphStatus graph_ret;
     {
@@ -264,7 +263,11 @@ bool ModelInstanceState::AddAndCompileGraph(ge::Session *session_, int graph_id,
     if (model_state_->GetGeOption().find("graph") != model_state_->GetGeOption().end()) {
         options = model_state_->GetGeOption()["graph"];
     }
-    ret = session_->AddGraph(graph_id, graph1, options);
+    std::map<AscendString, AscendString> ascend_options;
+    for (const auto &pair : options) {
+        ascend_options.emplace(AscendString(pair.first.c_str()), AscendString(pair.second.c_str()));
+    }
+    ret = session_->AddGraph(graph_id, graph1, ascend_options);
     if (ret != RET_OK) {
         LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                     (std::string("session_->AddGraph failed, ret is: ") + std::to_string(ret)).c_str());
@@ -322,6 +325,9 @@ void ModelInstanceState::ConfigureGeOptions(std::map<ge::AscendString, ge::Ascen
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, ("Pair: " + pair.first + " " + pair.second).c_str());
         options[ge::AscendString(pair.first.c_str())] = ge::AscendString(pair.second.c_str());
     }
+    if (m1.find("ge.graphRunMode") == m1.end()) {
+        options[ge::AscendString("ge.graphRunMode")] = ge::AscendString("0");
+    }
 }
 
 // 创建设备线程
@@ -343,7 +349,7 @@ void ModelInstanceState::CreateDeviceThreads(int dev_id, int dev_index, int devi
     }
 
     std::vector<ge::Session *> sessions = {};
-    CreateSessions(dev_id, dev_index, device_exec_block, options, sessions);
+    CreateSessions(dev_index, device_exec_block, options, sessions);
 
     CreateThreads(dev_id, dev_index, device_exec_block, mu, context_, sessions, threads);
 }
@@ -370,12 +376,11 @@ bool ModelInstanceState::SetDeviceAndContext(int dev_id, aclrtContext &context_)
     return true;
 }
 
-void ModelInstanceState::CreateSessions(int dev_id, int dev_index, int device_exec_block,
+void ModelInstanceState::CreateSessions(int dev_index, int device_exec_block,
                                         const std::map<ge::AscendString, ge::AscendString> &options,
                                         std::vector<ge::Session *> &sessions)
 {
     for (int j = 0; j < device_exec_block; j++) {
-        int graph_id = j + device_exec_block * dev_index + model_state_->GetInitStatus() * 1000;
         ge::Session *session = nullptr;
 
         if (!model_state_->GetGeStaticMode()) {
@@ -402,7 +407,7 @@ void ModelInstanceState::CreateThreads(int dev_id, int dev_index, int device_exe
                                        std::vector<std::thread> &threads)
 {
     for (int j = 0; j < device_exec_block; j++) {
-        int graph_id = j + device_exec_block * dev_index;
+        int graph_id = j + device_exec_block * dev_index + model_state_->GetInitStatus() * 1000;
         threads.emplace_back([this, &mu, graph_id, context_, dev_id, sessions, j]() {
             InitializeGraphSession(graph_id, dev_id, context_, mu, sessions[j]);
         });
@@ -510,7 +515,7 @@ int ModelInstanceState::InitializeDeviceThreads(const std::vector<int> &dev_ids_
     std::vector<std::thread> threads;
     std::mutex mu;
 
-    for (int i = 0; i < dev_ids_.size(); i++) {
+    for (size_t i = 0; i < dev_ids_.size(); i++) {
         CreateDeviceThreads(dev_ids_[i], i, device_exec_block_, threads, mu);
     }
 
@@ -545,11 +550,10 @@ TRITONSERVER_Error *ModelInstanceState::Create(ModelState *model_state,
                                                TRITONBACKEND_ModelInstance *triton_model_instance,
                                                ModelInstanceState **state)
 {
-    
-        *state = new ModelInstanceState(model_state, triton_model_instance);
+    *state = new ModelInstanceState(model_state, triton_model_instance);
     if ((*state)->Init() != RET_OK) {
-        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN, 
-            "init instance error, please check log for more info.");
+        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN,
+                                     "init instance error, please check log for more info.");
     }
     return nullptr;  // success
 }
@@ -563,21 +567,7 @@ ModelInstanceState::ModelInstanceState(ModelState *model_state, TRITONBACKEND_Mo
 
 ModelInstanceState::~ModelInstanceState()
 {
-    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("ModelInstanceState 释放开始 ")).c_str());
-    next_id.fetch_sub(1);
-    if (thread_id_ == 0) {
-        while (1) {
-            sleep(1);
-            if (next_id.load() == 0) {
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "wait sub ==0 try finalize");
-                ge::GEFinalize();
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, " GEFinalize");
-                aclFinalize();
-                LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, " aclFinalize");
-                break;
-            }
-        }
-    }
+    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("ModelInstanceState Release Start ")).c_str());
     if (inference_ != nullptr) {
         delete inference_;
         inference_ = nullptr;
@@ -587,8 +577,7 @@ ModelInstanceState::~ModelInstanceState()
 int ModelInstanceState::ProcessRequests(TRITONBACKEND_Request **requests, const uint32_t request_count)
 {
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("request_count ") + to_string(request_count)).c_str());
-    inference_->HandleRequest(requests, request_count);
-    return RET_OK;
+    return inference_->HandleRequest(requests, request_count);
 }
 
 }

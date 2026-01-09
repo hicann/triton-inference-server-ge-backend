@@ -175,8 +175,10 @@ TRITONSERVER_Error *TRITONBACKEND_ModelInstanceExecute(TRITONBACKEND_ModelInstan
 
     int ret = instance_state->ProcessRequests(requests, request_count);
     if (ret != RET_OK) {
-        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("ProcessRequests fail")).c_str());
-        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN, "unexpected nullptr in BackendModelInstanceException");
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                    (std::string("ProcessRequests fail please check triton log find error info")).c_str());
+        return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_UNKNOWN,
+                                     "ProcessRequests fail please check triton log find error info");
     }
     return nullptr;  // success
 }

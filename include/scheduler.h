@@ -99,7 +99,7 @@ public:
     int GetRunningCount(int group_id);
 
     // 获取空闲 instance - 自动更新状态和任务计数
-    std::vector<Instance *> GetIdleInstances(aclrtContext now_context, int num, bool is_lb);
+    std::vector<Instance *> GetIdleInstances(aclrtContext now_context, int num);
     int batch_accu_ = 0;
     std::vector<int> batch_result_;
     std::queue<TRITONBACKEND_Request *> input_queue_;
@@ -125,8 +125,8 @@ private:
 
     // 选择策略方法
     void WaitForIdleInstances(int required_num, std::unique_lock<std::mutex> &lock);
-    std::vector<Instance *> SelectInstancesSimple(aclrtContext now_context, int num);
-    std::vector<Instance *> SelectInstancesWithLoadBalance(aclrtContext now_context, int num);
+    std::vector<Instance *> SelectInstancesSimple(aclrtContext now_context, size_t num);
+    std::vector<Instance *> SelectInstancesWithLoadBalance(aclrtContext now_context, size_t num);
 
     // 状态更新方法
     void UpdateSelectedInstancesStatus(const std::vector<Instance *> &selected_instances);

@@ -24,6 +24,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_compile_options(-std=c++17)
+add_compile_options(-Wno-unused-parameter)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -42,6 +43,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wl,--build-id=none")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-z,relro,-z,now")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pie -fexceptions")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ftrapv -s")
+
 
 
 # add_definitions(-D_GLIBCXX_USE_C99=1)
