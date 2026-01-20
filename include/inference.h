@@ -43,68 +43,18 @@ public:
     ge::DataType TransToGeData(size_t key) const;
 
     void FreeDevResources(std::vector<void *> indev_buffer_, std::vector<void *> outdev_buffer_);
-    void FreeHostResources(std::vector<void *> inhost_buffer_, std::vector<void *> outhost_buffer_);
-
     void CalculateBatchDistribution(int batch_total, size_t instance_count, std::vector<int> &input_offset,
                                     std::vector<int> &batch_result);
-
-    int PrepareOutputBuffers(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
-                             std::vector<int> &outhost_line_size_, int batch_total);
-
     void GetExecutionBatchParams(int batch, int &exec_batch, int &cycle_count);
-    int ProcessSingleInstance(Scheduler::Instance *instance, int instance_index, int instance_count,
-                              std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                              std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                              const std::vector<int> &input_offset, const std::vector<int> &batch_result,
-                              int &success_count, int &invalid_count);
 
     int CheckInferenceResult(int success_count, int invalid_count, int total_instances);
-
-    int ExecuteInference(std::vector<Scheduler::Instance *> instances, std::vector<void *> &inhost_buffer_,
-                         std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                         std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
-                         const std::vector<int> &batch_result);
-
-    int ExecuteInferenceParallel(std::vector<Scheduler::Instance *> instances, std::vector<void *> &inhost_buffer_,
-                                 std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                                 std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
-                                 const std::vector<int> &batch_result);
-
-    int ExecuteSingleInference(Scheduler::Instance *instance, int instance_index, int instance_count,
-                               std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                               std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                               const std::vector<int> &input_offset, const std::vector<int> &batch_result);
-
-    int PrepareInputTensors(std::vector<int> &inhost_line_size_, int exec_batch, int instance_index,
-                            std::vector<void *> &indev_buffer_, std::vector<gert::Tensor> &inputs);
-
-    int BuildInputTensor(size_t input_index, int exec_batch, void *dev_buffer, gert::Tensor &tensor);
-
-    int PrepareOutputTensors(std::vector<int> &outhost_line_size_, int exec_batch, std::vector<void *> &outdev_buffer_,
-                             std::vector<gert::Tensor> &outputs);
-
-    int BuildOutputTensor(size_t output_index, int exec_batch, void *out_dev_buffer, gert::Tensor &tensor);
-
-    int ExecuteInferenceCycle(Scheduler::Instance *instance, std::vector<void *> &inhost_buffer_,
-                              std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                              std::vector<int> &outhost_line_size_, std::vector<gert::Tensor> &inputs,
-                              std::vector<gert::Tensor> &outputs, int exec_batch, int cycle_count, int instance_index,
-                              const std::vector<int> &input_offset);
-
-    int ExecuteInference(Scheduler::Instance *instance, std::vector<gert::Tensor> &inputs,
-                         std::vector<gert::Tensor> &outputs);
-
     std::unique_ptr<int64_t[]> CreateOutputShape(size_t output_index, uint32_t &size, int batch_total);
 
     int Start();
     void InitTypeMappings();
 
     int BatchSplicTasks(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result);
-    int ProcessCombineRequest(std::vector<TRITONBACKEND_Request *> &batch_tasks,
-                              std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result);
-    int ExtractCombineInputInfo(int batch_total, std::vector<TRITONBACKEND_Request *> &batch_tasks,
-                                std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
-                                std::vector<int> &inhost_line_size_, std::vector<int> &input_offset);
+
     void CalculateCombineBatchDistribution(std::vector<int> &input_offset, std::vector<int> &batch_combine);
     int BuildComblineResponse(TRITONBACKEND_Request *request, std::vector<void *> &outhost_buffer_,
                               std::vector<int64_t> &outsize, int batch_total, int &input_offset,
@@ -112,9 +62,6 @@ public:
     int GetTotalBatch(std::vector<int> &batch_result);
     int BuildSingleCombineOutput(TRITONBACKEND_Response *response, size_t output_index, void *outhost_buffer,
                                  int64_t buffer_size, int batch_total);
-    int PrepareCombineOutputBuffers(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
-                                    std::vector<int> &outhost_line_size_, int batch_total);
-
     void JoinAllThreads(std::vector<std::thread> &threads);
     ModelState *model_state_ = nullptr;
 
@@ -145,27 +92,63 @@ public:
     void ProcessValuesWithoutBatchOffset(ModelState::Express &ex, std::map<std::string, int> &values1);
     void LogResult(std::pair<size_t, size_t> &index);
     bool CanCombine(ModelState *model_state);
-    int AllocateCombinedMemory(ModelState *model_state, std::vector<void *> &inhost_buffer_,
-                               std::vector<int> &inhost_line_size_, int batch_total);
-    int AllocateSingleMemory(ModelState *model_state, size_t j, std::vector<void *> &inhost_buffer_,
-                             std::vector<int> &inhost_line_size_, const int64_t *shape, uint32_t dims_count,
-                             const void *buffer, uint64_t buffer_size);
-    int ProcessInputBuffers(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
-                            std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                            std::vector<int> &input_offset);
-    int ProcessRequestInputs(TRITONBACKEND_Request *request, size_t request_index, std::vector<int> &batch_result,
-                             std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                             std::vector<int> &input_offset);
-    int ProcessInputBuffer(TRITONBACKEND_Input *input, size_t input_index, size_t request_index,
-                           std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
-                           std::vector<int> &inhost_line_size_, std::vector<int> &input_offset);
     void ProcessFormulaCharacters(std::string &formula, std::stack<char> &opStack, std::vector<std::string> &output,
                                   std::string &currentNumber);
+    int BuildOutputTensor(size_t output_index, int exec_batch, void *out_dev_buffer, gert::Tensor &tensor);
     void ProcessCurrentNumber(std::string &currentNumber, std::vector<std::string> &output);
     void ProcessCharacter(char c, std::stack<char> &opStack, std::vector<std::string> &output);
     void ProcessRightParenthesis(std::stack<char> &opStack, std::vector<std::string> &output);
     void ProcessOperator(char c, std::stack<char> &opStack, std::vector<std::string> &output);
     void HandleRemainingOperators(std::stack<char> &opStack, std::vector<std::string> &output);
+    int PrepareOutputTensors(std::vector<int> &outhost_line_size_, int exec_batch, std::vector<void *> &outdev_buffer_,
+                             std::vector<gert::Tensor> &outputs);
+    int AllocateSingleMemoryV2(ModelState *model_state, size_t j, std::vector<void *> &indev_buffer_,
+                               std::vector<int> &indev_line_size_, const int64_t *shape, uint32_t dims_count,
+                               const void *buffer, uint64_t buffer_size);
+    int ProcessRequestInputsV2(TRITONBACKEND_Request *request, size_t request_index, std::vector<int> &batch_result,
+                               std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                               std::vector<int> &input_offset);
+    int ProcessInputBuffersV2(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
+                              std::vector<int> &input_offset, std::vector<void *> &indev_buffer_,
+                              std::vector<int> &indev_line_size_);
+    int AllocateCombinedMemoryV2(ModelState *model_state, std::vector<void *> &indev_buffer_,
+                                 std::vector<int> &indev_line_size_, int batch_total);
+    int ExtractCombineInputInfoV2(int batch_total, std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                  std::vector<int> &batch_result, std::vector<int> &input_offset,
+                                  std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_);
+    int PrepareOutputBuffersV2(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
+                               std::vector<int> &outhost_line_size_, int batch_total);
+    void FreeHostResourcesV2(std::vector<void *> outhost_buffer_);
+    int BuildInputTensorV2(size_t input_index, int exec_batch, std::vector<void *> &indev_buffer_, gert::Tensor &tensor,
+                           int cycle_count, std::vector<int> &indev_line_size_, std::vector<void *> &oneBtachDev);
+    int PrepareInputTensorsV2(std::vector<int> &indev_line_size_, int exec_batch, int instance_index,
+                              std::vector<void *> &indev_buffer_, std::vector<gert::Tensor> &inputs, int cycle_count,
+                              std::vector<void *> &oneBtachDev);
+    int ExecuteInferenceCycleV2(Scheduler::Instance *instance, std::vector<void *> &indev_buffer_,
+                                std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                                std::vector<int> &outhost_line_size_, std::vector<gert::Tensor> &inputs,
+                                std::vector<gert::Tensor> &outputs, int exec_batch, int cycle_count, int instance_index,
+                                const std::vector<int> &input_offset);
+    int ExecuteSingleInferenceV2(Scheduler::Instance *instance, int instance_index, int instance_count,
+                                 std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                                 std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
+                                 const std::vector<int> &input_offset, const std::vector<int> &batch_result);
+    int ProcessSingleInstanceV2(Scheduler::Instance *instance, int instance_index, int instance_count,
+                                std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                                std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
+                                const std::vector<int> &input_offset, const std::vector<int> &batch_result,
+                                int &success_count, int &invalid_count);
+    int ExecuteInferenceV2(std::vector<Scheduler::Instance *> instances, std::vector<void *> &indev_buffer_,
+                           std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                           std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
+                           const std::vector<int> &batch_result);
+    int ExecuteInferenceParallelV2(std::vector<Scheduler::Instance *> instances, std::vector<void *> &indev_buffer_,
+                                   std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                                   std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
+                                   const std::vector<int> &batch_result);
+    int ProcessCombineRequestV2(std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result);
+    void FreeDevResourcesUtils(std::vector<void *> &dev_buffer_);
 
 private:
     std::map<size_t, size_t> size_by_type_;

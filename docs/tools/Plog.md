@@ -1,21 +1,22 @@
 # Plog打印
 当模型运行出错时，如果从现有日志中无法判断具体原因，需要打开plog日志查看详细原因。
+# Plog介绍
+日志主要用于记录系统的运行过程及异常信息，帮助用户快速定位系统运行过程中出现的问题以及开发过程中的程序调试问题。开发者可通过本节描述的环境变量，控制日志的落盘路径以及日志级别等信息。   
+日志默认存储路径（$HOME/ascend/log）为了方便调试，可以将plog打印到标准输出中。   
+详细说明请参[昇腾官方文档](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/maintenref/envvar/envref_07_0121.html)。   
+
 # 启动方法
-当前框架已集成相关能力， 支持两种启动方式。对应 **0** 和 **1** 两种配置，当填写 **0** 时，关闭；**1** 时开启。
-## 通过config配置
-在config.pbtxt中添加如下参数：
-```json
-parameters:
-{
-  key: "plog",
-  value: {string_value: "1"}
-}
+通过环境变量重定向到标准输出中，并调整日志级别：
 ```
-## 通过启动参数配置
-在启动命令中配置如下参数：
-```bash
---backend-config=npu_ge,plog="1"
+export ASCEND_SLOG_PRINT_TO_STDOUT=1
+export ASCEND_GLOBAL_LOG_LEVEL=1
 ```
+在启动脚本后添加重定向 >plog.log   
+```
+/opt/tritonserver/bin/tritonserver --model-repository {/path/to/models} >plog.log 
+``` 
+在plog.log里查找ERROR信息
+
 # 成功启动结果
 打开成功后，会在输出中包含如下所示plog日志：
 ![](../figures/Plog_1.png)
