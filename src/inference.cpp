@@ -146,87 +146,189 @@ void Inference::CalculateCombineBatchDistribution(std::vector<int> &input_offset
     }
 }
 
-// 构建输入信息
-int Inference::ExtractCombineInputInfo(int batch_total, std::vector<TRITONBACKEND_Request *> &batch_tasks,
-                                       std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
-                                       std::vector<int> &inhost_line_size_, std::vector<int> &input_offset)
-{
-    // 计算每个请求的起始复制位置
-    CalculateCombineBatchDistribution(input_offset, batch_result);
-    // 能组合的情况 提前申请内存
-    if (CanCombine(model_state_)) {
-        CHECK_RET_ERR(AllocateCombinedMemory(model_state_, inhost_buffer_, inhost_line_size_, batch_total));
-    } else {
-        // 多个请求无法合并 此时只处理一个请求
-        // dims_in需要在解析出传递数据的时候申请
-    }
-
-    return ProcessInputBuffers(batch_tasks, batch_result, inhost_buffer_, inhost_line_size_, input_offset);
-}
-
-int Inference::ProcessInputBuffers(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
-                                   std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                                   std::vector<int> &input_offset)
-{
-    for (size_t i = 0; i < batch_tasks.size(); i++) {
-        TRITONBACKEND_Request *request = batch_tasks[i];
-        CHECK_RET_ERR(ProcessRequestInputs(request, i, batch_result, inhost_buffer_, inhost_line_size_, input_offset));
-    }
-    return RET_OK;
-}
-
-int Inference::ProcessRequestInputs(TRITONBACKEND_Request *request, size_t request_index,
-                                    std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
-                                    std::vector<int> &inhost_line_size_, std::vector<int> &input_offset)
-{
-    for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
-        TRITONBACKEND_Input *input;
-        TRITONBACKEND_RequestInputByIndex(request, j, &input);
-        CHECK_RET_ERR(
-            ProcessInputBuffer(input, j, request_index, batch_result, inhost_buffer_, inhost_line_size_, input_offset));
-    }
-    return RET_OK;
-}
-
-int Inference::ProcessInputBuffer(TRITONBACKEND_Input *input, size_t input_index, size_t request_index,
-                                  std::vector<int> &batch_result, std::vector<void *> &inhost_buffer_,
-                                  std::vector<int> &inhost_line_size_, std::vector<int> &input_offset)
-{
-    TRITONSERVER_DataType datatype;
-    const int64_t *shape;
-    uint32_t dims_count;
-    const char *input_name;
-    TRITONBACKEND_InputProperties(input, &input_name, &datatype, &shape, &dims_count, nullptr, nullptr);
-    const void *buffer;
-    uint64_t buffer_size;
-    TRITONSERVER_MemoryType memory_type;
-    int64_t memory_type_id;
-    TRITONBACKEND_InputBuffer(input, 0, &buffer, &buffer_size, &memory_type, &memory_type_id);
-
-    // 此处向总申请的输入host内存复制
-    if (CanCombine(model_state_)) {
-        if (static_cast<uint64_t>(batch_result[request_index] * inhost_line_size_[input_index]) != buffer_size) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR, (std::string("buffer_size get error")).c_str());
-            return RET_ERR;
-        }
-        std::copy(static_cast<const char *>(buffer), static_cast<const char *>(buffer) + buffer_size,
-                  static_cast<char *>(inhost_buffer_[input_index]) +
-                      input_offset[request_index] * inhost_line_size_[input_index]);
-    } else {
-        CHECK_RET_ERR(AllocateSingleMemory(model_state_, input_index, inhost_buffer_, inhost_line_size_, shape,
-                                           dims_count, buffer, buffer_size));
-    }
-    return RET_OK;
-}
-
 bool Inference::CanCombine(ModelState *model_state)
 {
     return model_state->GetDynamicmode().preferred_batch_sizes.size() > 0 &&
            model_state->GetModelNode() == ModelState::ModelMode::MAX_BATCH && model_state->GetInToOutMap().size() == 0;
 }
 
-int Inference::AllocateCombinedMemory(ModelState *model_state, std::vector<void *> &inhost_buffer_,
-                                      std::vector<int> &inhost_line_size_, int batch_total)
+// 获取执行批次参数
+void Inference::GetExecutionBatchParams(int batch, int &exec_batch, int &cycle_count)
+{
+    if (model_state_->GetGeStaticMode()) {
+        if (model_state_->GetInferMode() == ModelState::InferMode::DYNAMICMODEL ||
+            model_state_->GetDynamicBatchSupport()) {
+            exec_batch = 1;
+            cycle_count = batch;
+        } else {
+            exec_batch = batch;
+            cycle_count = 1;
+        }
+    } else {
+        exec_batch = batch;
+        cycle_count = 1;
+    }
+}
+
+ge::DataType Inference::TransToGeData(size_t key) const
+{
+    auto it = ge_data_trans_.find(key);
+    if (it != ge_data_trans_.end()) {
+        return it->second;
+    } else {
+        std::cerr << "键 " << key << " 不存在" << std::endl;
+        return ge::DT_MAX;
+    }
+}
+
+void Inference::FreeDevResources(std::vector<void *> indev_buffer_, std::vector<void *> outdev_buffer_)
+{
+    for (size_t i = 0; i < indev_buffer_.size(); i++) {
+        aclrtFree(indev_buffer_[i]);
+    }
+    indev_buffer_.clear();
+
+    for (size_t i = 0; i < outdev_buffer_.size(); i++) {
+        aclrtFree(outdev_buffer_[i]);
+    }
+    outdev_buffer_.clear();
+}
+
+// 等待所有线程完成
+void Inference::JoinAllThreads(std::vector<std::thread> &threads)
+{
+    for (auto &thread : threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+}
+
+// 计算批次分配
+void Inference::CalculateBatchDistribution(int batch_total, size_t instance_count, std::vector<int> &input_offset,
+                                           std::vector<int> &batch_result)
+{
+    input_offset.resize(instance_count, 0);
+    batch_result.resize(instance_count, 0);
+
+    size_t base = batch_total / instance_count;
+    size_t remainder = batch_total % instance_count;
+
+    for (size_t i = 0; i < instance_count; ++i) {
+        batch_result[i] = base;
+        if (i < remainder) {
+            batch_result[i] += 1;
+        }
+    }
+
+    for (size_t i = 1; i < instance_count; ++i) {
+        input_offset[i] = input_offset[i - 1] + batch_result[i - 1];
+    }
+}
+
+int Inference::AllocateSingleMemoryV2(ModelState *model_state, size_t j, std::vector<void *> &indev_buffer_,
+                                      std::vector<int> &indev_line_size_, const int64_t *shape, uint32_t dims_count,
+                                      const void *buffer, uint64_t buffer_size)
+{
+    // 申请dev侧内存 直接将数据复制到dev侧
+    aclError acl_ret;
+    size_t sample_element_size = GetValueByKey(model_state->GetInputClientTensors()[j].dtype_);
+    int per_buffer_size = sample_element_size;
+    int64_t total_out_size = static_cast<int64_t>(sample_element_size);
+    vector<int64_t> v1;
+    for (size_t i = 0; i < dims_count; i++) {
+        v1.push_back(shape[i]);
+        total_out_size *= shape[i];
+    }
+    input_tensor_info_[j].tensor_dims_ = v1;
+    // 申请buffer_size大小的dev内存
+    void *indev_buffer = nullptr;
+    acl_ret = aclrtMalloc(&indev_buffer, buffer_size, ACL_MEM_MALLOC_NORMAL_ONLY);
+    if (acl_ret != ACL_ERROR_NONE) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                    (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
+        return RET_ERR;
+    }
+    // 复制数据到dev侧
+    acl_ret = aclrtMemcpy(indev_buffer, buffer_size, buffer, buffer_size, ACL_MEMCPY_HOST_TO_DEVICE);
+    if (acl_ret != ACL_SUCCESS) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                    (std::string("aclrtMemcpy is failed, ret code is ") + std::to_string(acl_ret)).c_str());
+        return RET_ERR;
+    }
+    indev_buffer_.push_back(indev_buffer);
+
+    int index = 1;
+    ModelState::ModelMode modelmode = model_state_->GetModelNode();
+    if (modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME ||
+        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
+        index = 0;
+    }
+
+    for (size_t k = index; k < dims_count; k++) {
+        per_buffer_size *= shape[k];
+    }
+    indev_line_size_.push_back(per_buffer_size);
+    return RET_OK;
+}
+
+int Inference::ProcessRequestInputsV2(TRITONBACKEND_Request *request, size_t request_index,
+                                      std::vector<int> &batch_result, std::vector<void *> &indev_buffer_,
+                                      std::vector<int> &indev_line_size_, std::vector<int> &input_offset)
+{  // 得到每个张量 每行的大小 默认维度0是批次
+    aclError acl_ret;
+    for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
+        TRITONBACKEND_Input *input;
+        TRITONBACKEND_RequestInputByIndex(request, j, &input);
+        TRITONSERVER_DataType datatype;
+        const int64_t *shape;
+        uint32_t dims_count;
+        const char *input_name;
+        TRITONBACKEND_InputProperties(input, &input_name, &datatype, &shape, &dims_count, nullptr, nullptr);
+        const void *buffer;
+        uint64_t buffer_size;
+        TRITONSERVER_MemoryType memory_type;
+        int64_t memory_type_id;
+        TRITONBACKEND_InputBuffer(input, 0, &buffer, &buffer_size, &memory_type, &memory_type_id);
+        if (CanCombine(model_state_)) {
+            if (static_cast<uint64_t>(batch_result[request_index] * indev_line_size_[j]) != buffer_size) {
+                LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                            (std::string("buffer_size get error batch_result[request_index] ") +
+                             std::to_string(batch_result[request_index]) + " indev_line_size_[input_index] " +
+                             std::to_string(indev_line_size_[j]) + " buffer_size " + std::to_string(buffer_size))
+                                .c_str());
+                return RET_ERR;
+            }
+            // 复制数据 按偏移
+            acl_ret =
+                aclrtMemcpy(static_cast<char *>(indev_buffer_[j]) + input_offset[request_index] * indev_line_size_[j],
+                            buffer_size, buffer, buffer_size, ACL_MEMCPY_HOST_TO_DEVICE);
+            if (acl_ret != ACL_SUCCESS) {
+                LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                            (std::string("aclrtMemcpy is failed, ret code is ") + std::to_string(acl_ret)).c_str());
+                return RET_ERR;
+            }
+        } else {
+            CHECK_RET_ERR(AllocateSingleMemoryV2(model_state_, j, indev_buffer_, indev_line_size_, shape, dims_count,
+                                                 buffer, buffer_size));
+        }
+    }
+    return RET_OK;
+}
+
+int Inference::ProcessInputBuffersV2(std::vector<TRITONBACKEND_Request *> &batch_tasks, std::vector<int> &batch_result,
+                                     std::vector<int> &input_offset, std::vector<void *> &indev_buffer_,
+                                     std::vector<int> &indev_line_size_)
+{
+    for (size_t i = 0; i < batch_tasks.size(); i++) {
+        TRITONBACKEND_Request *request = batch_tasks[i];
+        CHECK_RET_ERR(ProcessRequestInputsV2(request, i, batch_result, indev_buffer_, indev_line_size_, input_offset));
+    }
+    return RET_OK;
+}
+
+int Inference::AllocateCombinedMemoryV2(ModelState *model_state, std::vector<void *> &indev_buffer_,
+                                        std::vector<int> &indev_line_size_, int batch_total)
 {
     aclError acl_ret;
     for (size_t i = 0; i < model_state->GetInputCount(); i++) {
@@ -244,48 +346,34 @@ int Inference::AllocateCombinedMemory(ModelState *model_state, std::vector<void 
             total_out_size *= dims_in[k];
             per_buffer_size *= dims_in[k];
         }
-        void *inhost_buffer = nullptr;
-        acl_ret = aclrtMallocHost(&inhost_buffer, total_out_size);
-        if (acl_ret != ACL_SUCCESS) {
+        void *indev_buffer = nullptr;
+        acl_ret = aclrtMalloc(&indev_buffer, total_out_size, ACL_MEM_MALLOC_NORMAL_ONLY);
+        if (acl_ret != ACL_ERROR_NONE) {
             LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
                         (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
             return RET_ERR;
         }
-        inhost_buffer_.push_back(inhost_buffer);
-        inhost_line_size_.push_back(per_buffer_size);
+        indev_buffer_.push_back(indev_buffer);
+        indev_line_size_.push_back(per_buffer_size);
     }
     return RET_OK;
 }
 
-int Inference::AllocateSingleMemory(ModelState *model_state, size_t j, std::vector<void *> &inhost_buffer_,
-                                    std::vector<int> &inhost_line_size_, const int64_t *shape, uint32_t dims_count,
-                                    const void *buffer, uint64_t buffer_size)
+int Inference::ExtractCombineInputInfoV2(int batch_total, std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                         std::vector<int> &batch_result, std::vector<int> &input_offset,
+                                         std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_)
 {
-    vector<int64_t> v1;
-    for (size_t i = 0; i < dims_count; i++) {
-        v1.push_back(shape[i]);
+    // 计算每个请求的起始复制位置
+    CalculateCombineBatchDistribution(input_offset, batch_result);
+    if (CanCombine(model_state_)) {
+        CHECK_RET_ERR(AllocateCombinedMemoryV2(model_state_, indev_buffer_, indev_line_size_, batch_total));
     }
-    input_tensor_info_[j].tensor_dims_ = v1;
-    inhost_buffer_.push_back(const_cast<void *>(buffer));
-
-    size_t sample_element_size = GetValueByKey(model_state->GetInputClientTensors()[j].dtype_);
-    int per_buffer_size = sample_element_size;
-    int index = 1;
-    ModelState::ModelMode modelmode = model_state_->GetModelNode();
-    if (modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME ||
-        modelmode == ModelState::ModelMode::NO_MAX_BATCH_FIRST_NOT_SAME_EXIST_NEGATIVE) {
-        index = 0;
-    }
-    for (size_t k = index; k < dims_count; k++) {
-        per_buffer_size *= shape[k];
-    }
-    inhost_line_size_.push_back(per_buffer_size);
-    return RET_OK;
+    return ProcessInputBuffersV2(batch_tasks, batch_result, input_offset, indev_buffer_, indev_line_size_);
 }
 
 // 准备输出缓冲区
-int Inference::PrepareOutputBuffers(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
-                                    std::vector<int> &outhost_line_size_, int batch_total)
+int Inference::PrepareOutputBuffersV2(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
+                                      std::vector<int> &outhost_line_size_, int batch_total)
 {
     aclError acl_ret;
 
@@ -328,38 +416,20 @@ int Inference::PrepareOutputBuffers(std::vector<void *> &outhost_buffer_, std::v
     return RET_OK;
 }
 
-// 获取执行批次参数
-void Inference::GetExecutionBatchParams(int batch, int &exec_batch, int &cycle_count)
+void Inference::FreeHostResourcesV2(std::vector<void *> outhost_buffer_)
 {
-    if (model_state_->GetGeStaticMode()) {
-        if (model_state_->GetInferMode() == ModelState::InferMode::DYNAMICMODEL ||
-            model_state_->GetDynamicBatchSupport()) {
-            exec_batch = 1;
-            cycle_count = batch;
-        } else {
-            exec_batch = batch;
-            cycle_count = 1;
-        }
-    } else {
-        exec_batch = batch;
-        cycle_count = 1;
+    for (size_t i = 0; i < outhost_buffer_.size(); i++) {
+        aclrtFreeHost(outhost_buffer_[i]);
     }
-}
-
-ge::DataType Inference::TransToGeData(size_t key) const
-{
-    auto it = ge_data_trans_.find(key);
-    if (it != ge_data_trans_.end()) {
-        return it->second;
-    } else {
-        std::cerr << "键 " << key << " 不存在" << std::endl;
-        return ge::DT_MAX;
-    }
+    outhost_buffer_.clear();
 }
 
 // 构建输入张量
-int Inference::BuildInputTensor(size_t input_index, int exec_batch, void *dev_buffer, gert::Tensor &tensor)
+int Inference::BuildInputTensorV2(size_t input_index, int exec_batch, std::vector<void *> &indev_buffer_,
+                                  gert::Tensor &tensor, int cycle_count, std::vector<int> &indev_line_size_,
+                                  std::vector<void *> &oneBtachDev)
 {
+    // TODO 如果循环次数是1 直接使用偏移的数据地址 如果循环次数是exec_batch 重新申请一块内存 再添加一次复制操作 dev->dev
     std::initializer_list<int64_t> origin_shape_list;
     std::initializer_list<int64_t> storage_shape_list;
     gert::StorageShape input_shape(origin_shape_list, storage_shape_list);
@@ -412,16 +482,30 @@ int Inference::BuildInputTensor(size_t input_index, int exec_batch, void *dev_bu
                 (std::string("set input_dtype is ") + std::to_string(static_cast<int>(input_dtype))).c_str());
 
     gert::StorageFormat input_format(ge::FORMAT_ND, ge::FORMAT_ND, {});
+    void *dev_buffer;
+    if (exec_batch == 1 && cycle_count > 1) {  // 走one batch分支
+        aclError acl_ret;
+        int buffer_size = exec_batch * indev_line_size_[input_index];
+        acl_ret = aclrtMalloc(&dev_buffer, buffer_size, ACL_MEM_MALLOC_NORMAL_ONLY);
+        if (acl_ret != ACL_ERROR_NONE) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                        (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
+            return RET_ERR;
+        }
+        oneBtachDev.push_back(dev_buffer);
+    } else {
+        dev_buffer = indev_buffer_[input_index];
+    }
     tensor = {input_shape, input_format, gert::kOnDeviceHbm, input_dtype, dev_buffer};
 
     return RET_OK;
 }
 
 // 准备输入张量
-int Inference::PrepareInputTensors(std::vector<int> &inhost_line_size_, int exec_batch, int instance_index,
-                                   std::vector<void *> &indev_buffer_, std::vector<gert::Tensor> &inputs)
+int Inference::PrepareInputTensorsV2(std::vector<int> &indev_line_size_, int exec_batch, int instance_index,
+                                     std::vector<void *> &indev_buffer_, std::vector<gert::Tensor> &inputs,
+                                     int cycle_count, std::vector<void *> &oneBtachDev)
 {
-    aclError acl_ret;
     inputs.resize(model_state_->GetInputCount());
 
     for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
@@ -429,18 +513,102 @@ int Inference::PrepareInputTensors(std::vector<int> &inhost_line_size_, int exec
                                                " : " + std::to_string(exec_batch))
                                                   .c_str());
 
-        int buffer_size = exec_batch * inhost_line_size_[j];
-        void *dev_buffer = nullptr;
-        acl_ret = aclrtMalloc(&dev_buffer, buffer_size, ACL_MEM_MALLOC_NORMAL_ONLY);
-        if (acl_ret != ACL_ERROR_NONE) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                        (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
+        // 构建输入张量
+        if (BuildInputTensorV2(j, exec_batch, indev_buffer_, inputs[j], cycle_count, indev_line_size_, oneBtachDev) !=
+            RET_OK) {
             return RET_ERR;
         }
-        indev_buffer_.push_back(dev_buffer);
+    }
+    return RET_OK;
+}
 
-        // 构建输入张量
-        if (BuildInputTensor(j, exec_batch, dev_buffer, inputs[j]) != RET_OK) {
+int Inference::ExecuteInferenceCycleV2(Scheduler::Instance *instance, std::vector<void *> &indev_buffer_,
+                                       std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                                       std::vector<int> &outhost_line_size_, std::vector<gert::Tensor> &inputs,
+                                       std::vector<gert::Tensor> &outputs, int exec_batch, int cycle_count,
+                                       int instance_index, const std::vector<int> &input_offset)
+{
+    aclError acl_ret;
+    ge::Status ret;
+
+    for (int k = 0; k < cycle_count; k++) {
+        // one batch 循环cycle_count次 从dev侧复制数据到dev侧
+        if (cycle_count > 1 && exec_batch == 1) {
+            for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
+                int buffer_size = exec_batch * indev_line_size_[j];
+                void *src_ptr =
+                    (void *)((BYTE_PTR)indev_buffer_[j] + (input_offset[instance_index] + k) * indev_line_size_[j]);
+                acl_ret =
+                    aclrtMemcpy(inputs[j].GetAddr(), buffer_size, src_ptr, buffer_size, ACL_MEMCPY_DEVICE_TO_DEVICE);
+                if (acl_ret != ACL_SUCCESS) {
+                    LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                                (std::string("aclrtMemcpy is failed, ret code is ") + std::to_string(acl_ret)).c_str());
+                    return RET_ERR;
+                }
+            }
+        }
+
+        // 开始推理
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "start infer!: ");
+        ret = instance->session->ExecuteGraphWithStreamAsync(instance->index, instance->stream, inputs, outputs);
+        if (ret != RET_OK) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                        (std::string("execute model failed, ret is: ") + std::to_string(ret)).c_str());
+            return RET_ERR;
+        }
+
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("aclrtSynchronizeStream: ")).c_str());
+        acl_ret = aclrtSynchronizeStream(instance->stream);
+        if (acl_ret != ACL_SUCCESS) {
+            LOG_MESSAGE(
+                TRITONSERVER_LOG_ERROR,
+                (std::string("aclrtSynchronizeStream is failed, ret code is ") + std::to_string(acl_ret)).c_str());
+            return RET_ERR;
+        }
+
+        // 复制输出数据到主机
+        for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
+            int total_out_size = exec_batch * outhost_line_size_[j];
+            void *outdevBuffer = outputs[j].GetAddr();
+            void *dst_ptr =
+                (void *)((BYTE_PTR)outhost_buffer_[j] + (input_offset[instance_index] + k) * outhost_line_size_[j]);
+
+            aclrtMemcpy(dst_ptr, total_out_size, outdevBuffer, total_out_size, ACL_MEMCPY_DEVICE_TO_HOST);
+        }
+    }
+
+    return RET_OK;
+}
+
+void Inference::FreeDevResourcesUtils(std::vector<void *> &dev_buffer_)
+{
+    for (size_t i = 0; i < dev_buffer_.size(); i++) {
+        aclrtFree(dev_buffer_[i]);
+    }
+    dev_buffer_.clear();
+}
+
+// 准备输出张量
+int Inference::PrepareOutputTensors(std::vector<int> &outhost_line_size_, int exec_batch,
+                                    std::vector<void *> &outdev_buffer_, std::vector<gert::Tensor> &outputs)
+{
+    aclError acl_ret;
+    outputs.resize(model_state_->GetOutputCount());
+
+    for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
+        int total_out_size = exec_batch * outhost_line_size_[j];
+        void *out_dev_buffer = nullptr;
+        acl_ret = aclrtMalloc(&out_dev_buffer, total_out_size, ACL_MEM_MALLOC_NORMAL_ONLY);
+        if (acl_ret != ACL_ERROR_NONE) {
+            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
+                        (std::string("malloc host buffer failed, ret is:") + std::to_string(static_cast<int>(acl_ret)))
+                            .c_str());
+            return RET_ERR;
+        }
+        outdev_buffer_.push_back(out_dev_buffer);
+
+        // 构建输出张量
+        if (BuildOutputTensor(j, exec_batch, out_dev_buffer, outputs[j]) != RET_OK) {
             return RET_ERR;
         }
     }
@@ -485,108 +653,11 @@ int Inference::BuildOutputTensor(size_t output_index, int exec_batch, void *out_
     return RET_OK;
 }
 
-// 准备输出张量
-int Inference::PrepareOutputTensors(std::vector<int> &outhost_line_size_, int exec_batch,
-                                    std::vector<void *> &outdev_buffer_, std::vector<gert::Tensor> &outputs)
-{
-    aclError acl_ret;
-    outputs.resize(model_state_->GetOutputCount());
-
-    for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
-        int total_out_size = exec_batch * outhost_line_size_[j];
-        void *out_dev_buffer = nullptr;
-        acl_ret = aclrtMalloc(&out_dev_buffer, total_out_size, ACL_MEM_MALLOC_NORMAL_ONLY);
-        if (acl_ret != ACL_ERROR_NONE) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                        (std::string("malloc host buffer failed, ret is:") + std::to_string(static_cast<int>(acl_ret)))
-                            .c_str());
-            return RET_ERR;
-        }
-        outdev_buffer_.push_back(out_dev_buffer);
-
-        // 构建输出张量
-        if (BuildOutputTensor(j, exec_batch, out_dev_buffer, outputs[j]) != RET_OK) {
-            return RET_ERR;
-        }
-    }
-    return RET_OK;
-}
-
-// 执行推理循环
-int Inference::ExecuteInferenceCycle(Scheduler::Instance *instance, std::vector<void *> &inhost_buffer_,
-                                     std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                                     std::vector<int> &outhost_line_size_, std::vector<gert::Tensor> &inputs,
-                                     std::vector<gert::Tensor> &outputs, int exec_batch, int cycle_count,
-                                     int instance_index, const std::vector<int> &input_offset)
-{
-    aclError acl_ret;
-    ge::Status ret;
-
-    for (int k = 0; k < cycle_count; k++) {
-        // 复制输入数据到设备
-        for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
-            int buffer_size = exec_batch * inhost_line_size_[j];
-            void *src_ptr =
-                (void *)((BYTE_PTR)inhost_buffer_[j] + (input_offset[instance_index] + k) * inhost_line_size_[j]);
-
-            acl_ret = aclrtMemcpy(inputs[j].GetAddr(), buffer_size, src_ptr, buffer_size, ACL_MEMCPY_HOST_TO_DEVICE);
-            if (acl_ret != ACL_SUCCESS) {
-                LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                            (std::string("aclrtMemcpy is failed, ret code is ") + std::to_string(acl_ret)).c_str());
-                return RET_ERR;
-            }
-        }
-
-        // 开始推理
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "start infer!: ");
-        ret = instance->session->ExecuteGraphWithStreamAsync(instance->index, instance->stream, inputs, outputs);
-        if (ret != RET_OK) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                        (std::string("execute model failed, ret is: ") + std::to_string(ret)).c_str());
-            return RET_ERR;
-        }
-
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("aclrtSynchronizeStream: ")).c_str());
-        acl_ret = aclrtSynchronizeStream(instance->stream);
-        if (acl_ret != ACL_SUCCESS) {
-            LOG_MESSAGE(
-                TRITONSERVER_LOG_ERROR,
-                (std::string("aclrtSynchronizeStream is failed, ret code is ") + std::to_string(acl_ret)).c_str());
-            return RET_ERR;
-        }
-
-        // 复制输出数据到主机
-        for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
-            int total_out_size = exec_batch * outhost_line_size_[j];
-            void *outdevBuffer = outputs[j].GetAddr();
-            void *dst_ptr =
-                (void *)((BYTE_PTR)outhost_buffer_[j] + (input_offset[instance_index] + k) * outhost_line_size_[j]);
-
-            aclrtMemcpy(dst_ptr, total_out_size, outdevBuffer, total_out_size, ACL_MEMCPY_DEVICE_TO_HOST);
-        }
-    }
-
-    return RET_OK;
-}
-
-void Inference::FreeDevResources(std::vector<void *> indev_buffer_, std::vector<void *> outdev_buffer_)
-{
-    for (size_t i = 0; i < indev_buffer_.size(); i++) {
-        aclrtFree(indev_buffer_[i]);
-    }
-    indev_buffer_.clear();
-
-    for (size_t i = 0; i < outdev_buffer_.size(); i++) {
-        aclrtFree(outdev_buffer_[i]);
-    }
-    outdev_buffer_.clear();
-}
-
 // 执行单个推理实例
-int Inference::ExecuteSingleInference(Scheduler::Instance *instance, int instance_index, int instance_count,
-                                      std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                                      std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                                      const std::vector<int> &input_offset, const std::vector<int> &batch_result)
+int Inference::ExecuteSingleInferenceV2(Scheduler::Instance *instance, int instance_index, int instance_count,
+                                        std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                                        std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
+                                        const std::vector<int> &input_offset, const std::vector<int> &batch_result)
 {
     int batch = batch_result[instance_index];
     if (batch == 0) {
@@ -599,50 +670,45 @@ int Inference::ExecuteSingleInference(Scheduler::Instance *instance, int instanc
 
     aclrtSetCurrentContext(instance->context);
 
-    std::vector<void *> indev_buffer_;
     std::vector<void *> outdev_buffer_;
     std::vector<gert::Tensor> inputs;
     std::vector<gert::Tensor> outputs;
+    std::vector<void *> oneBtachDev;
 
     // 准备输入张量
-    if (PrepareInputTensors(inhost_line_size_, exec_batch, instance_index, indev_buffer_, inputs) != RET_OK) {
+    if (PrepareInputTensorsV2(indev_line_size_, exec_batch, instance_index, indev_buffer_, inputs, cycle_count,
+                              oneBtachDev) != RET_OK) {
         FreeDevResources(indev_buffer_, outdev_buffer_);
+        FreeDevResourcesUtils(oneBtachDev);
         return RET_ERR;
     }
 
     // 准备输出张量
     if (PrepareOutputTensors(outhost_line_size_, exec_batch, outdev_buffer_, outputs) != RET_OK) {
         FreeDevResources(indev_buffer_, outdev_buffer_);
+        FreeDevResourcesUtils(oneBtachDev);
         return RET_ERR;
     }
 
     // 执行推理循环
-    if (ExecuteInferenceCycle(instance, inhost_buffer_, inhost_line_size_, outhost_buffer_, outhost_line_size_, inputs,
-                              outputs, exec_batch, cycle_count, instance_index, input_offset) != RET_OK) {
+    if (ExecuteInferenceCycleV2(instance, indev_buffer_, indev_line_size_, outhost_buffer_, outhost_line_size_, inputs,
+                                outputs, exec_batch, cycle_count, instance_index, input_offset) != RET_OK) {
         FreeDevResources(indev_buffer_, outdev_buffer_);
+        FreeDevResourcesUtils(oneBtachDev);
         return RET_ERR;
     }
 
     FreeDevResources(indev_buffer_, outdev_buffer_);
+    FreeDevResourcesUtils(oneBtachDev);
     return RET_OK;
 }
 
-// 等待所有线程完成
-void Inference::JoinAllThreads(std::vector<std::thread> &threads)
-{
-    for (auto &thread : threads) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
-}
-
 // 处理单个推理实例的公共方法
-int Inference::ProcessSingleInstance(Scheduler::Instance *instance, int instance_index, int instance_count,
-                                     std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                                     std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                                     const std::vector<int> &input_offset, const std::vector<int> &batch_result,
-                                     int &success_count, int &invalid_count)
+int Inference::ProcessSingleInstanceV2(Scheduler::Instance *instance, int instance_index, int instance_count,
+                                       std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                                       std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
+                                       const std::vector<int> &input_offset, const std::vector<int> &batch_result,
+                                       int &success_count, int &invalid_count)
 {
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("instance_index: ") + std::to_string(instance_index) +
                                            " :batch: " + std::to_string(batch_result[instance_index]))
@@ -654,8 +720,8 @@ int Inference::ProcessSingleInstance(Scheduler::Instance *instance, int instance
         return RET_OK;  // 无效实例，但不算错误
     }
 
-    int result = ExecuteSingleInference(instance, instance_index, instance_count, inhost_buffer_, inhost_line_size_,
-                                        outhost_buffer_, outhost_line_size_, input_offset, batch_result);
+    int result = ExecuteSingleInferenceV2(instance, instance_index, instance_count, indev_buffer_, indev_line_size_,
+                                          outhost_buffer_, outhost_line_size_, input_offset, batch_result);
     if (result == RET_OK) {
         success_count++;
     }
@@ -663,21 +729,11 @@ int Inference::ProcessSingleInstance(Scheduler::Instance *instance, int instance
     return result;
 }
 
-// 检查推理结果的公共方法
-int Inference::CheckInferenceResult(int success_count, int invalid_count, int total_instances)
-{
-    if (success_count != (total_instances - invalid_count) || invalid_count == total_instances) {
-        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "infer output failed!");
-        return RET_ERR;
-    }
-    return RET_OK;
-}
-
 // 串行执行推理（不使用线程）
-int Inference::ExecuteInference(std::vector<Scheduler::Instance *> instances, std::vector<void *> &inhost_buffer_,
-                                std::vector<int> &inhost_line_size_, std::vector<void *> &outhost_buffer_,
-                                std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
-                                const std::vector<int> &batch_result)
+int Inference::ExecuteInferenceV2(std::vector<Scheduler::Instance *> instances, std::vector<void *> &indev_buffer_,
+                                  std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                                  std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
+                                  const std::vector<int> &batch_result)
 {
     if (instances.empty()) {
         return RET_OK;  // 没有实例，直接返回成功
@@ -687,9 +743,9 @@ int Inference::ExecuteInference(std::vector<Scheduler::Instance *> instances, st
     int invalid_count = 0;
 
     for (size_t instance_index = 0; instance_index < instances.size(); instance_index++) {
-        int ret = ProcessSingleInstance(instances[instance_index], instance_index, instances.size(), inhost_buffer_,
-                                        inhost_line_size_, outhost_buffer_, outhost_line_size_, input_offset,
-                                        batch_result, success_count, invalid_count);
+        int ret = ProcessSingleInstanceV2(instances[instance_index], instance_index, instances.size(), indev_buffer_,
+                                          indev_line_size_, outhost_buffer_, outhost_line_size_, input_offset,
+                                          batch_result, success_count, invalid_count);
         if (ret == RET_ERR) {
             return RET_ERR;
         }
@@ -700,11 +756,10 @@ int Inference::ExecuteInference(std::vector<Scheduler::Instance *> instances, st
     return CheckInferenceResult(success_count, invalid_count, instances.size());
 }
 
-// 并行执行推理
-int Inference::ExecuteInferenceParallel(std::vector<Scheduler::Instance *> instances,
-                                        std::vector<void *> &inhost_buffer_, std::vector<int> &inhost_line_size_,
-                                        std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
-                                        const std::vector<int> &input_offset, const std::vector<int> &batch_result)
+int Inference::ExecuteInferenceParallelV2(std::vector<Scheduler::Instance *> instances,
+                                          std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                                          std::vector<void *> &outhost_buffer_, std::vector<int> &outhost_line_size_,
+                                          const std::vector<int> &input_offset, const std::vector<int> &batch_result)
 {
     if (instances.empty()) {
         return RET_OK;  // 没有实例，直接返回成功
@@ -717,14 +772,14 @@ int Inference::ExecuteInferenceParallel(std::vector<Scheduler::Instance *> insta
 
     for (size_t instance_index = 0; instance_index < instances.size(); instance_index++) {
         threads.emplace_back([this, &mu, &success_count, &invalid_count, instance = instances[instance_index],
-                              instance_index, count = instances.size(), &inhost_buffer_, &inhost_line_size_,
+                              instance_index, count = instances.size(), &indev_buffer_, &indev_line_size_,
                               &outhost_buffer_, &outhost_line_size_, &input_offset, &batch_result]() {
             // 使用局部变量来收集结果，然后原子更新
             int local_success = 0;
             int local_invalid = 0;
 
-            ProcessSingleInstance(instance, instance_index, count, inhost_buffer_, inhost_line_size_, outhost_buffer_,
-                                  outhost_line_size_, input_offset, batch_result, local_success, local_invalid);
+            ProcessSingleInstanceV2(instance, instance_index, count, indev_buffer_, indev_line_size_, outhost_buffer_,
+                                    outhost_line_size_, input_offset, batch_result, local_success, local_invalid);
 
             // 原子更新计数
             if (local_invalid > 0) {
@@ -740,6 +795,110 @@ int Inference::ExecuteInferenceParallel(std::vector<Scheduler::Instance *> insta
     model_state_->GetScheduler()->SetInstanceStatus(instances, Scheduler::Status::IDLE);
 
     return CheckInferenceResult(success_count, invalid_count, instances.size());
+}
+
+// 检查推理结果的公共方法
+int Inference::CheckInferenceResult(int success_count, int invalid_count, int total_instances)
+{
+    if (success_count != (total_instances - invalid_count) || invalid_count == total_instances) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, "infer output failed!");
+        return RET_ERR;
+    }
+    return RET_OK;
+}
+
+int Inference::ProcessCombineRequestV2(std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                       std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result)
+{
+    // 设置当前上下文
+    aclrtContext nowContext;
+    aclrtGetCurrentContext(&nowContext);
+    if (nowContext != instances[0]->context) {
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "process request setcurrentContext ");
+        aclrtSetCurrentContext(instances[0]->context);
+    }
+    vector<int64_t> outsize;
+    std::vector<void *> outhost_buffer_;
+    std::vector<void *> indev_buffer_;
+    std::vector<int> indev_line_size_;
+    std::vector<int> outhost_line_size_;
+    std::vector<int> input_offset;
+    int batch_total = GetTotalBatch(batch_result);
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("batch_total: ") + std::to_string(batch_total)).c_str());
+    // 准备输入数据 将请求中的数据都复制到dev侧
+    if (ExtractCombineInputInfoV2(batch_total, batch_tasks, batch_result, input_offset, indev_buffer_,
+                                  indev_line_size_) != RET_OK) {
+        return RET_ERR;
+    }
+    // 计算未知维度
+    // 根据实际的维度计算输出张量中维度是-1的实际值
+    CalcNegativeOne();
+    // 准备输出数据
+    if (PrepareOutputBuffersV2(outhost_buffer_, outsize, outhost_line_size_, batch_total) != RET_OK) {
+        FreeHostResourcesV2(outhost_buffer_);
+        return RET_ERR;
+    }
+    // 将总批次的数据 分给多个instance取处理
+    std::vector<int> instance_offset;
+    std::vector<int> instance_batch;
+    int instance_count = instances.size();
+    CalculateBatchDistribution(batch_total, instance_count, instance_offset, instance_batch);
+    // 推理
+    if (instances.size() == 1) {
+        if (ExecuteInferenceV2(instances, indev_buffer_, indev_line_size_, outhost_buffer_, outhost_line_size_,
+                               input_offset, instance_batch) == RET_ERR) {
+            FreeHostResourcesV2(outhost_buffer_);
+            return RET_ERR;
+        }
+    } else {
+        if (ExecuteInferenceParallelV2(instances, indev_buffer_, indev_line_size_, outhost_buffer_, outhost_line_size_,
+                                       input_offset, instance_batch) == RET_ERR) {
+            FreeHostResourcesV2(outhost_buffer_);
+            return RET_ERR;
+        }
+    }
+    // 拆分请求回复
+    // 输出结果重新拆分
+    for (size_t i = 0; i < batch_tasks.size(); i++) {
+        std::vector<int64_t> single_outsize_;
+        for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
+            single_outsize_.push_back(batch_result[i] * outhost_line_size_[j]);
+        }
+        if (BuildComblineResponse(batch_tasks[i], outhost_buffer_, single_outsize_, batch_result[i], input_offset[i],
+                                  outhost_line_size_) != RET_OK) {
+            FreeHostResourcesV2(outhost_buffer_);
+            return RET_ERR;
+        }
+    }
+    return RET_OK;
+}
+
+// 构建响应
+int Inference::BuildComblineResponse(TRITONBACKEND_Request *request, std::vector<void *> &outhost_buffer_,
+                                     std::vector<int64_t> &outsize, int batch_total, int &input_offset,
+                                     std::vector<int> &outhost_line_size_)
+{
+    TRITONBACKEND_Response *response;
+    TRITONBACKEND_ResponseNew(&response, request);
+
+    for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
+        void *outhost_buffer = (BYTE_PTR)(outhost_buffer_[j] + input_offset * outhost_line_size_[j]);
+        if (BuildSingleCombineOutput(response, j, outhost_buffer, outsize[j], batch_total) != RET_OK) {
+            TRITONBACKEND_ResponseDelete(response);
+            return RET_ERR;
+        }
+    }
+
+    TRITONSERVER_Error *error = TRITONBACKEND_ResponseSend(response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, nullptr);
+    if (error != nullptr) {
+        TRITONBACKEND_ResponseDelete(response);
+        TRITONSERVER_ErrorDelete(error);
+        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("TRITONBACKEND_ResponseSend failed, ")).c_str());
+        return RET_ERR;
+    }
+    LOG_IF_ERROR(TRITONBACKEND_RequestRelease(request, TRITONSERVER_REQUEST_RELEASE_ALL), "failed releasing request");
+
+    return RET_OK;
 }
 
 // 构建单个输出
@@ -781,169 +940,6 @@ int Inference::BuildSingleCombineOutput(TRITONBACKEND_Response *response, size_t
     }
 
     std::copy((BYTE_PTR)outhost_buffer, (BYTE_PTR)outhost_buffer + buffer_size, (BYTE_PTR)buffer_out);
-    return RET_OK;
-}
-
-int Inference::PrepareCombineOutputBuffers(std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
-                                           std::vector<int> &outhost_line_size_, int batch_total)
-{
-    aclError acl_ret;
-
-    for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
-        size_t sample_element_size = GetValueByKey(model_state_->GetOutputClientTensors()[j].dtype_);
-        int64_t total_out_size = static_cast<int64_t>(sample_element_size);
-        vector<int64_t> dims_out = model_state_->GetOutputClientTensors()[j].dims_;
-        total_out_size *= batch_total;
-        for (auto dim : dims_out) {
-            total_out_size *= dim;
-            LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("out dim: ") + to_string(dim)).c_str());
-        }
-
-        void *outhost_buffer = nullptr;
-        acl_ret = aclrtMallocHost(&outhost_buffer, total_out_size);
-        if (acl_ret != ACL_SUCCESS) {
-            LOG_MESSAGE(TRITONSERVER_LOG_ERROR,
-                        (std::string("malloc dev buffer failed, ret is:") + std::to_string(acl_ret)).c_str());
-            return RET_ERR;
-        }
-        outhost_buffer_.push_back(outhost_buffer);
-        outsize.push_back(total_out_size);
-
-        int per_buffer_size = sample_element_size;
-        for (size_t k = 0; k < dims_out.size(); k++) {
-            per_buffer_size *= dims_out[k];
-        }
-        outhost_line_size_.push_back(per_buffer_size);
-    }
-    return RET_OK;
-}
-
-// 构建响应
-int Inference::BuildComblineResponse(TRITONBACKEND_Request *request, std::vector<void *> &outhost_buffer_,
-                                     std::vector<int64_t> &outsize, int batch_total, int &input_offset,
-                                     std::vector<int> &outhost_line_size_)
-{
-    TRITONBACKEND_Response *response;
-    TRITONBACKEND_ResponseNew(&response, request);
-
-    for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
-        void *outhost_buffer = (BYTE_PTR)(outhost_buffer_[j] + input_offset * outhost_line_size_[j]);
-        if (BuildSingleCombineOutput(response, j, outhost_buffer, outsize[j], batch_total) != RET_OK) {
-            TRITONBACKEND_ResponseDelete(response);
-            return RET_ERR;
-        }
-    }
-
-    TRITONSERVER_Error *error = TRITONBACKEND_ResponseSend(response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, nullptr);
-    if (error != nullptr) {
-        TRITONBACKEND_ResponseDelete(response);
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("TRITONBACKEND_ResponseSend failed, ")).c_str());
-        return RET_ERR;
-    }
-    LOG_IF_ERROR(TRITONBACKEND_RequestRelease(request, TRITONSERVER_REQUEST_RELEASE_ALL), "failed releasing request");
-
-    return RET_OK;
-}
-
-void Inference::FreeHostResources(std::vector<void *> inhost_buffer_, std::vector<void *> outhost_buffer_)
-{
-    for (size_t i = 0; i < inhost_buffer_.size(); i++) {
-        aclrtFreeHost(inhost_buffer_[i]);
-    }
-
-    inhost_buffer_.clear();
-    for (size_t i = 0; i < outhost_buffer_.size(); i++) {
-        aclrtFreeHost(outhost_buffer_[i]);
-    }
-    outhost_buffer_.clear();
-}
-
-// 计算批次分配
-void Inference::CalculateBatchDistribution(int batch_total, size_t instance_count, std::vector<int> &input_offset,
-                                           std::vector<int> &batch_result)
-{
-    input_offset.resize(instance_count, 0);
-    batch_result.resize(instance_count, 0);
-
-    size_t base = batch_total / instance_count;
-    size_t remainder = batch_total % instance_count;
-
-    for (size_t i = 0; i < instance_count; ++i) {
-        batch_result[i] = base;
-        if (i < remainder) {
-            batch_result[i] += 1;
-        }
-    }
-
-    for (size_t i = 1; i < instance_count; ++i) {
-        input_offset[i] = input_offset[i - 1] + batch_result[i - 1];
-    }
-}
-
-int Inference::ProcessCombineRequest(std::vector<TRITONBACKEND_Request *> &batch_tasks,
-                                     std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result)
-{
-    // 设置当前上下文
-    aclrtContext nowContext;
-    aclrtGetCurrentContext(&nowContext);
-    if (nowContext != instances[0]->context) {
-        LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "process request setcurrentContext ");
-        aclrtSetCurrentContext(instances[0]->context);
-    }
-    vector<int64_t> outsize;
-    std::vector<void *> outhost_buffer_;
-    std::vector<void *> inhost_buffer_;
-    std::vector<int> inhost_line_size_;
-    std::vector<int> outhost_line_size_;
-    std::vector<int> input_offset;
-    // 数据合并 成一个总大小的
-    int batch_total = GetTotalBatch(batch_result);
-    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("batch_total: ") + std::to_string(batch_total)).c_str());
-    // 准备输入数据
-    if (ExtractCombineInputInfo(batch_total, batch_tasks, batch_result, inhost_buffer_, inhost_line_size_,
-                                input_offset) != RET_OK) {
-        return RET_ERR;
-    }
-    // 计算未知维度
-    // 根据实际的维度计算输出张量中维度是-1的实际值
-    CalcNegativeOne();
-    // 准备输出数据
-    if (PrepareOutputBuffers(outhost_buffer_, outsize, outhost_line_size_, batch_total) != RET_OK) {
-        FreeHostResources(inhost_buffer_, outhost_buffer_);
-        return RET_ERR;
-    }
-    // 将总批次的数据 分给多个instance取处理
-    std::vector<int> instance_offset;
-    std::vector<int> instance_batch;
-    int instance_count = instances.size();
-    CalculateBatchDistribution(batch_total, instance_count, instance_offset, instance_batch);
-    // 推理
-    if (instances.size() == 1) {
-        if (ExecuteInference(instances, inhost_buffer_, inhost_line_size_, outhost_buffer_, outhost_line_size_,
-                             input_offset, instance_batch) == RET_ERR) {
-            FreeHostResources(inhost_buffer_, outhost_buffer_);
-            return RET_ERR;
-        }
-    } else {
-        if (ExecuteInferenceParallel(instances, inhost_buffer_, inhost_line_size_, outhost_buffer_, outhost_line_size_,
-                                     input_offset, instance_batch) == RET_ERR) {
-            FreeHostResources(inhost_buffer_, outhost_buffer_);
-            return RET_ERR;
-        }
-    }
-    // 拆分请求回复
-    // 输出结果重新拆分
-    for (size_t i = 0; i < batch_tasks.size(); i++) {
-        std::vector<int64_t> single_outsize_;
-        for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
-            single_outsize_.push_back(batch_result[i] * outhost_line_size_[j]);
-        }
-        if (BuildComblineResponse(batch_tasks[i], outhost_buffer_, single_outsize_, batch_result[i], input_offset[i],
-                                  outhost_line_size_) != RET_OK) {
-            FreeHostResources(inhost_buffer_, outhost_buffer_);
-            return RET_ERR;
-        }
-    }
     return RET_OK;
 }
 
@@ -1259,7 +1255,7 @@ int Inference::BatchSplicTasks(std::vector<TRITONBACKEND_Request *> &batch_tasks
 {
     std::vector<Scheduler::Instance *> instances =
         model_state_->GetScheduler()->GetIdleInstances(nullptr, model_state_->GetInstanceExecBlock());
-    if (ProcessCombineRequest(batch_tasks, instances, batch_result) != RET_OK) {
+    if (ProcessCombineRequestV2(batch_tasks, instances, batch_result) != RET_OK) {
         return RET_ERR;
     }
     return RET_OK;
