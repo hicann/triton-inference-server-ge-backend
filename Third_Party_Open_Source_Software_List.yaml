@@ -1,0 +1,21 @@
+#(全量组件，type缺省为run，存在测试组件类型test，构建组件类型build，辅助类插件plugin.以及发行组件类型run，需要额外类型联系安全sig)
+#YAML格式，靠空格缩进表达层级关系（禁止用Tab缩进），缩进2个空格（也可以是4个，只要同级元素缩进一致即可）
+triton-inference-server::server:
+  version: r24.02
+  type: run
+  url: https://github.com/triton-inference-server/server.git
+triton-inference-server::core:
+  version: r24.02
+  type: run
+  url: https://github.com/triton-inference-server/core.git
+triton-inference-server::common:
+  version: r24.02
+  type: run
+  url: https://github.com/triton-inference-server/common.git
+triton-inference-server::backend:
+  version: r24.02
+  type: run
+  url: https://github.com/triton-inference-server/backend.git
+onnxruntime:
+  version: v1.23.2
+  type: run
