@@ -1,0 +1,63 @@
+name: "resnet"
+backend: "npu_ge"
+max_batch_size: 64
+
+# input output 可以不填，由程序自行解析
+input [
+  {
+    name: "data"
+    data_type: TYPE_FP32
+    dims: [3, 224, 224 ]
+  }
+]
+output [
+  {
+    name: "resnetv24_dense0_fwd"
+    data_type: TYPE_FP32
+    dims: [1000 ]
+  }
+]
+
+#初始测试建议1，后续性能调优可以参考相关文档调整
+instance_group [{
+  count: 1
+}
+]
+
+#动态batch合并，静态图场景下需删除
+# dynamic_batching { 
+#   max_queue_delay_microseconds: 1000  # 等待合并的最大延迟（微秒），可调整
+#   preferred_batch_size: [2, 4, 8]    # 优先合并成这些batch_size（可选）
+# }
+
+# 选择运行在哪些卡上
+parameters: [
+{
+  key: "device_ids",
+  value: {string_value: "4,5"}
+}
+]
+
+# 静态图开关，仅在所有shape均为固定值时生效
+# parameters: [
+# {
+#   key: "static_model",
+#   value: {string_value: "1"} # GE静态图开关，此配置与 dynamic_batching 互斥
+# }
+# ]
+
+# Profiling 开关
+# parameters: [
+# {
+#   key: "profiling",
+#   value: {string_value: "dynamic"} # 打开动态profiling
+# }
+# ]
+
+# 锁核设置
+# parameters: [
+# {
+#   key: "ge.aicoreNum",
+#   value: {string_value: "12|10"} # 锁核，每个Stream使用cube12个，vector10个
+# }
+# ]

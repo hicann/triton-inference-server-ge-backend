@@ -17,7 +17,6 @@
 #include "ge_error_codes.h"
 #include "ge_api_types.h"
 #include "ge_api.h"
-#include "all_ops.h"
 #include "acl/acl.h"
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_model_instance.h"

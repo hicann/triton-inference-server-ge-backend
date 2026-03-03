@@ -18,7 +18,6 @@
 #include "ge_error_codes.h"
 #include "ge_api_types.h"
 #include "ge_api.h"
-#include "all_ops.h"
 #include "acl/acl.h"
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_model_instance.h"
@@ -148,6 +147,22 @@ public:
                                    const std::vector<int> &batch_result);
     int ProcessCombineRequestV2(std::vector<TRITONBACKEND_Request *> &batch_tasks,
                                 std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result);
+
+    // ProcessCombineRequestV2 子函数
+    int SetInferenceContext(std::vector<Scheduler::Instance *> &instances);
+    int PrepareInferenceData(int batch_total, std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                            std::vector<int> &batch_result, std::vector<int> &input_offset,
+                            std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                            std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
+                            std::vector<int> &outhost_line_size_);
+    int DispatchInference(std::vector<Scheduler::Instance *> &instances, std::vector<void *> &indev_buffer_,
+                         std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                         std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
+                         const std::vector<int> &instance_batch);
+    int BuildCombineResponses(std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                             std::vector<void *> &outhost_buffer_, std::vector<int> &batch_result,
+                             std::vector<int> &input_offset, std::vector<int> &outhost_line_size_);
+
     void FreeDevResourcesUtils(std::vector<void *> &dev_buffer_);
 
 private:

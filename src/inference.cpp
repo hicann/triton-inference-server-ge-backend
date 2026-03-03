@@ -279,7 +279,7 @@ int Inference::ProcessRequestInputsV2(TRITONBACKEND_Request *request, size_t req
     aclError acl_ret;
     for (size_t j = 0; j < model_state_->GetInputCount(); j++) {
         TRITONBACKEND_Input *input;
-        TRITONBACKEND_RequestInputByIndex(request, j, &input);
+        TRITONBACKEND_RequestInput(request, model_state_->GetInputClientTensors()[j].name_.c_str(), &input); 
         TRITONSERVER_DataType datatype;
         const int64_t *shape;
         uint32_t dims_count;
@@ -807,58 +807,64 @@ int Inference::CheckInferenceResult(int success_count, int invalid_count, int to
     return RET_OK;
 }
 
-int Inference::ProcessCombineRequestV2(std::vector<TRITONBACKEND_Request *> &batch_tasks,
-                                       std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result)
+int Inference::SetInferenceContext(std::vector<Scheduler::Instance *> &instances)
 {
-    // 设置当前上下文
     aclrtContext nowContext;
     aclrtGetCurrentContext(&nowContext);
     if (nowContext != instances[0]->context) {
         LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, "process request setcurrentContext ");
         aclrtSetCurrentContext(instances[0]->context);
     }
-    vector<int64_t> outsize;
-    std::vector<void *> outhost_buffer_;
-    std::vector<void *> indev_buffer_;
-    std::vector<int> indev_line_size_;
-    std::vector<int> outhost_line_size_;
-    std::vector<int> input_offset;
-    int batch_total = GetTotalBatch(batch_result);
-    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("batch_total: ") + std::to_string(batch_total)).c_str());
-    // 准备输入数据 将请求中的数据都复制到dev侧
+    return RET_OK;
+}
+
+int Inference::PrepareInferenceData(int batch_total, std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                    std::vector<int> &batch_result, std::vector<int> &input_offset,
+                                    std::vector<void *> &indev_buffer_, std::vector<int> &indev_line_size_,
+                                    std::vector<void *> &outhost_buffer_, std::vector<int64_t> &outsize,
+                                    std::vector<int> &outhost_line_size_)
+{
+    // 提取输入信息
     if (ExtractCombineInputInfoV2(batch_total, batch_tasks, batch_result, input_offset, indev_buffer_,
                                   indev_line_size_) != RET_OK) {
         return RET_ERR;
     }
+
     // 计算未知维度
-    // 根据实际的维度计算输出张量中维度是-1的实际值
     CalcNegativeOne();
-    // 准备输出数据
+
+    // 准备输出缓冲区
     if (PrepareOutputBuffersV2(outhost_buffer_, outsize, outhost_line_size_, batch_total) != RET_OK) {
         FreeHostResourcesV2(outhost_buffer_);
         return RET_ERR;
     }
-    // 将总批次的数据 分给多个instance取处理
-    std::vector<int> instance_offset;
-    std::vector<int> instance_batch;
-    int instance_count = instances.size();
-    CalculateBatchDistribution(batch_total, instance_count, instance_offset, instance_batch);
-    // 推理
+
+    return RET_OK;
+}
+
+int Inference::DispatchInference(std::vector<Scheduler::Instance *> &instances, std::vector<void *> &indev_buffer_,
+                                 std::vector<int> &indev_line_size_, std::vector<void *> &outhost_buffer_,
+                                 std::vector<int> &outhost_line_size_, const std::vector<int> &input_offset,
+                                 const std::vector<int> &instance_batch)
+{
     if (instances.size() == 1) {
         if (ExecuteInferenceV2(instances, indev_buffer_, indev_line_size_, outhost_buffer_, outhost_line_size_,
                                input_offset, instance_batch) == RET_ERR) {
-            FreeHostResourcesV2(outhost_buffer_);
             return RET_ERR;
         }
     } else {
         if (ExecuteInferenceParallelV2(instances, indev_buffer_, indev_line_size_, outhost_buffer_, outhost_line_size_,
                                        input_offset, instance_batch) == RET_ERR) {
-            FreeHostResourcesV2(outhost_buffer_);
             return RET_ERR;
         }
     }
-    // 拆分请求回复
-    // 输出结果重新拆分
+    return RET_OK;
+}
+
+int Inference::BuildCombineResponses(std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                     std::vector<void *> &outhost_buffer_, std::vector<int> &batch_result,
+                                     std::vector<int> &input_offset, std::vector<int> &outhost_line_size_)
+{
     for (size_t i = 0; i < batch_tasks.size(); i++) {
         std::vector<int64_t> single_outsize_;
         for (size_t j = 0; j < model_state_->GetOutputCount(); j++) {
@@ -866,10 +872,59 @@ int Inference::ProcessCombineRequestV2(std::vector<TRITONBACKEND_Request *> &bat
         }
         if (BuildComblineResponse(batch_tasks[i], outhost_buffer_, single_outsize_, batch_result[i], input_offset[i],
                                   outhost_line_size_) != RET_OK) {
-            FreeHostResourcesV2(outhost_buffer_);
             return RET_ERR;
         }
     }
+    return RET_OK;
+}
+
+int Inference::ProcessCombineRequestV2(std::vector<TRITONBACKEND_Request *> &batch_tasks,
+                                       std::vector<Scheduler::Instance *> &instances, std::vector<int> &batch_result)
+{
+    // 设置上下文
+    if (SetInferenceContext(instances) != RET_OK) {
+        return RET_ERR;
+    }
+
+    // 准备变量
+    std::vector<int64_t> outsize;
+    std::vector<void *> outhost_buffer_;
+    std::vector<void *> indev_buffer_;
+    std::vector<int> indev_line_size_;
+    std::vector<int> outhost_line_size_;
+    std::vector<int> input_offset;
+    int batch_total = GetTotalBatch(batch_result);
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, (std::string("batch_total: ") + std::to_string(batch_total)).c_str());
+
+    // 准备推理数据（输入提取、维度计算、输出缓冲区准备）
+    if (PrepareInferenceData(batch_total, batch_tasks, batch_result, input_offset,
+                            indev_buffer_, indev_line_size_, outhost_buffer_, outsize,
+                            outhost_line_size_) != RET_OK) {
+        FreeHostResourcesV2(outhost_buffer_);
+        return RET_ERR;
+    }
+
+    // 计算批次分布
+    std::vector<int> instance_offset;
+    std::vector<int> instance_batch;
+    int instance_count = instances.size();
+    CalculateBatchDistribution(batch_total, instance_count, instance_offset, instance_batch);
+
+    // 执行推理
+    if (DispatchInference(instances, indev_buffer_, indev_line_size_, outhost_buffer_,
+                         outhost_line_size_, input_offset, instance_batch) != RET_OK) {
+        FreeHostResourcesV2(outhost_buffer_);
+        return RET_ERR;
+    }
+
+    // 构建响应
+    if (BuildCombineResponses(batch_tasks, outhost_buffer_, batch_result, input_offset,
+                             outhost_line_size_) != RET_OK) {
+        FreeHostResourcesV2(outhost_buffer_);
+        return RET_ERR;
+    }
+
+    FreeHostResourcesV2(outhost_buffer_);
     return RET_OK;
 }
 

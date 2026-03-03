@@ -5,7 +5,7 @@ project(tutorialombackend LANGUAGES C CXX)
 
 set(ASCEND_DIR /usr/local/Ascend)
 set(ASCEND_PATH /usr/local/Ascend/ascend-toolkit/latest)
-set(ATC_INCLUDE_DIR ${ASCEND_PATH}/compiler/include)
+set(ATC_INCLUDE_DIR ${ASCEND_PATH}/${ARCH}-linux/include)
 set(ONNXRUNTIME_ROOT /opt/onnxruntime)
 
 message("current arch: ${ARCH}")
