@@ -22,7 +22,7 @@ https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/ind
 
 ### 实现原理
 triton inference server 提供了Custom backend 接口，允许通过自定义backend实现NPU设备接入。
-1.  将本工程编译的backend文件libnpu_ge.so安装到 {Triton-server源码安装目录}/backends/npu_ge/,  启动triton-inference-erver服务端, server在拉起模型过程中根据模型设置，选择npu_ge后端对推理请求进行分发。  
+1.  将本工程编译的backend文件libnpu_ge.so安装到 {Triton-server源码安装目录}/backends/npu_ge/,  启动triton-inference-server服务端, server在拉起模型过程中根据模型设置，选择npu_ge后端对推理请求进行分发。  
 2.  ge_backend 采用 GE组图方式进行推理，基于C++实现，支持GE的图优化、UB融合、多流并行等诸多特性，以便更好的为服务化模型提供更高吞吐。   
 3.  模型在使用该框架时需要统一转换为Onnx格式，并基于triton-inference-server规范，配置模型相关config以及版本信息。
 
@@ -63,3 +63,5 @@ triton inference server 提供了Custom backend 接口，允许通过自定义ba
 
 - **问题反馈**：通过GitCode[【Issues】](https://gitcode.com/cann/triton-inference-server-ge-backend/issues)提交问题。
 - **社区互动**：通过GitCode[【讨论】](https://gitcode.com/cann/triton-inference-server-ge-backend/discussions)参与交流。
+- **微信交流群**：通过添加【GE小助手】，并反馈需要加入【triton-ge-backend交流群】，小助手会将您添加至相应交流群：
+![](docs/figures/geas.jpg)
