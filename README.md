@@ -39,7 +39,7 @@ triton inference server 提供了Custom backend 接口，允许通过自定义ba
 |  锁核 |配置每一条stream使用Cube以及Vector核心数量，以便多stream情况下提高吞吐| √ |
 |  非0轴动态 |支持非0轴情况下的动态shape| √ * |
 |  自动配置 | 支持onnx模型自动读取input、output免配置| √ * |
-*  *若output中包含动态轴，在导出onnx时需指定其与input中轴的关系，详情请查看 [Torch模型转换为onnx](#执行推理)  
+* 若output中包含动态轴，在导出onnx时需指定其与input中轴的关系，详情请查看 [Torch模型转换为onnx](docs/快速入门.md#执行推理)  
 
 ## 快速入门
 用户可参考 [快速入门](docs/快速入门.md) 文档，从0-1掌握如何使用该backend快速接入NPU，实现小模型服务化。
