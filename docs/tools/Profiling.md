@@ -63,7 +63,7 @@ cd profiling/PROF_*
 msprof --export=on --output=./
 ```
 执行完成后会生成相应的output文件   
-![](./figures/Profiling_7.png)   
+![](../figures/Profiling_7.png)   
 
 
 ##### profiling分析
