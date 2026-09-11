@@ -1,0 +1,87 @@
+name: PR-pipeline_triton-inference-server-ge-backend
+
+concurrency:
+  max: 15
+  exceed-action: QUEUE
+  enable: true
+  preemption:
+    enable: true
+    events: [mr_id]
+
+on:
+  pull_request_comment:
+    types: [created]
+    branches: [ '**' ]
+    comments: [ '^(?:\/)?compile*' ]
+  pr_comment:
+    types: [ created ]
+    keyword: '^(?:\/)?compile*'
+
+env:
+  org_name: "${{ vars.ORG_NAME }}"
+  repo_name: ${{atomgit.event.repository.name}}
+  MERGE_ID: ${{atomgit.event.pull_request.number}}
+  TARGET_BRANCH: ${{atomgit.base_ref}}
+  SOURCE_BRANCH: ${{atomgit.head_ref}}
+  obs_path: "${{ env.org_name }}/${{ env.repo_name }}/ci/package/${{ env.MERGE_ID }}"
+  obs_smoke_path: "${{ env.obs_path }}/presmoke/2"
+  online: ${{ vars.APPLY_LABEL }}
+
+stages:
+  stage1:
+    name: PreBuild
+    jobs:
+      JOB_image:
+        name: Test_image
+        steps:
+          - name: revise_image
+            identifier: revise_image
+            uses: cann/.gitcode/actions/revise-img@master
+            with:
+              repo_name: ${{ env.repo_name }}
+              target_branch: ${{ env.TARGET_BRANCH }}
+              comment: ${{ atomgit.event.comment.body }}
+              token: ${{ secrets.TESTTOKEN }}
+          - name: show_output
+            run: |
+              echo "Compile_Ascend_ARM: ${{ steps.revise_image.outputs.Compile_Ascend_X86 }}"
+        runs-on: ["self-hosted", "arch=x64", "spec=small"]
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/ubuntu20.04.05_x86:k8s_v1.1006
+      JOB_pre:
+        name: Test_PreBuild
+        uses: cann/.gitcode/.gitcode/workflows/pre_action.yml@master
+    pre:
+    - type: auto
+    fail-fast: true
+
+  stage2:
+    name: Compile
+    jobs:
+      JOB_CodeCheck:
+        name: CodeCheck
+        uses: .gitcode/workflows/codecheck_action.yml
+        with:
+          codecheck_image_version: ${{ jobs.JOB_image.outputs.codecheck }}
+      JOB_Compile_Ascend_ARM:
+        name: Compile_Ascend_ARM
+        uses: .gitcode/workflows/compile_action.yml
+        with:
+          task_name: 'Compile_Ascend_ARM'
+          image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM }}
+          arch: 'arm64'
+      # JOB_staticcheck_md_check:
+      #   name: CodeCheck_staticcheck_md_check
+      #   uses: .gitcode/workflows/staticcheck_action.yml
+      #   with:
+      #     check_type: 'md_check'
+      #     image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
+    pre:
+      - type: auto
+    fail-fast: true
+
+post:
+  jobs:
+    job_post:
+      name: Test_post
+      uses: cann/.gitcode/.gitcode/workflows/post_action.yml@master
