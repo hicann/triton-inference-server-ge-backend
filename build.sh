@@ -13,7 +13,7 @@ usage() {
 Usage: bash build.sh [options]
 
 Options:
-  --build-type <type>              Build type, Release or Debug (default: Debug)
+  --build-type <type>              Build type, Release or Debug (default: Release)
   --incremental                    Incremental build (default: clean build directory then full build)
   --tritonserver-version <version> Triton Inference Server version, also used as the
                                    git tag for common/core/backend repos (default: r24.02)
