@@ -1264,7 +1264,8 @@ void Inference::ProcessMapEntries(std::map<std::pair<size_t, size_t>, triton::ba
         map<string, int> values1;
 
         if (model_state_->GetModelNode() ==
-            ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM) {
+            ModelState::ModelMode::NO_MAX_BATCH_FIRST_SAME_NEGATIVE_ONE_HAVE_UNKNOW_DIM ||
+            model_state_->GetModelNode() == ModelState::ModelMode::MAX_BATCH_HAVE_UNKNOW_DIM) {
             ProcessValuesWithBatchOffset(ex, values1);
         } else {
             ProcessValuesWithoutBatchOffset(ex, values1);

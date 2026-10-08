@@ -1284,16 +1284,26 @@ TRITONSERVER_Error *ModelState::PreNegativeOne()
     return nullptr;
 }
 
+static void CopyDimName(std::vector<std::string> &client_dim_name,
+                        const std::vector<std::string> &onnx_dim_name, size_t start)
+{
+    if (start >= onnx_dim_name.size()) {
+        return;
+    }
+    client_dim_name.assign(onnx_dim_name.begin() + start, onnx_dim_name.end());
+}
+
 void ModelState::AddDimName()
 {
+    size_t start = (MaxBatchSize() > 0) ? 1 : 0;
     for (size_t i = 0; i < input_client_tensor_.size(); i++) {
         if (input_client_tensor_[i].dim_name_.size() == 0) {
-            input_client_tensor_[i].dim_name_ = input_onnx_tensor_[i].dim_name_;
+            CopyDimName(input_client_tensor_[i].dim_name_, input_onnx_tensor_[i].dim_name_, start);
         }
     }
     for (size_t i = 0; i < output_client_tensor_.size(); i++) {
         if (output_client_tensor_[i].dim_name_.size() == 0) {
-            output_client_tensor_[i].dim_name_ = output_onnx_tensor_[i].dim_name_;
+            CopyDimName(output_client_tensor_[i].dim_name_, output_onnx_tensor_[i].dim_name_, start);
         }
     }
 }
