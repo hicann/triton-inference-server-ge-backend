@@ -11,7 +11,7 @@
 2. 调整动态图在多实例下使用多Session方式，提高并发吞吐(显存占用会增高)；
 3. 支持动态batch场景小batch动态合并特性，配合多Session，提高吞吐；
 4. 补充调优方法论以及cnclip模型的最佳实践；
-5. 支持多模型特性，可支持同时拉起多个模型，提高现存利用率；
+5. 支持多模型特性，可支持同时拉起多个模型，提高显存利用率；
 6. 支持非0轴动态shape场景；
 7. 支持TensorFlow的pb文件。
 
@@ -38,7 +38,7 @@ triton inference server 提供了Custom backend 接口，允许通过自定义ba
 |  多流并行 |多实例场景下NPU支持多Stream，提高NPU利用率| √ |
 |  锁核 |配置每一条stream使用Cube以及Vector核心数量，以便多stream情况下提高吞吐| √ |
 |  非0轴动态 |支持非0轴情况下的动态shape| √ * |
-|  自动配置 | 支持onnx模型自动读取input、output免配置| √ * |
+|  自动配置 | 支持onnx模型自动读取input、output免配置| √ |
 * 若output中包含动态轴，在导出onnx时需指定其与input中轴的关系，详情请查看 [Torch模型转换为onnx](docs/快速入门.md#执行推理)  
 
 ## 快速入门
