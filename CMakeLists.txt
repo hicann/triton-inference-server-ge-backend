@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 
-project(tutorialombackend LANGUAGES C CXX)
+project(triton-npu-ge-backend LANGUAGES C CXX)
 
 
 set(ASCEND_DIR /usr/local/Ascend)
@@ -95,7 +95,7 @@ file(GLOB_RECURSE SOURCE_FILES "${CMAKE_CURRENT_LIST_DIR}/src/*.cpp")
 add_library(triton-npu-ge-backend SHARED ${SOURCE_FILES})
 
 add_library(
-TutorialmindieBackend::triton-npu-ge-backend ALIAS triton-npu-ge-backend
+triton-npu-ge-backend::triton-npu-ge-backend ALIAS triton-npu-ge-backend
 )
 
 target_include_directories(
