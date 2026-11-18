@@ -96,6 +96,22 @@ class BuildWorkingDirectoryTests(unittest.TestCase):
         self.assertTrue(self.owned.is_file())
         self.assertTrue(self.unrelated.is_file())
 
+    def test_invalid_abi_preserves_existing_build(self):
+        for value in ("invalid", ""):
+            with self.subTest(value=value):
+                result = self.run_build(self.caller, "--cxx11-abi", value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Invalid --cxx11-abi value", result.stderr)
+                self.assertTrue(self.owned.is_file())
+                self.assertTrue(self.unrelated.is_file())
+
+    def test_missing_abi_preserves_existing_build(self):
+        result = self.run_build(self.caller, "--cxx11-abi")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid --cxx11-abi value", result.stderr)
+        self.assertTrue(self.owned.is_file())
+        self.assertTrue(self.unrelated.is_file())
+
     def test_missing_source_marker_rejects_before_cleanup(self):
         self.repository.joinpath("CMakeLists.txt").unlink()
         result = self.run_build(self.caller)

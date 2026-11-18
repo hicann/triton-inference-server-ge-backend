@@ -54,9 +54,21 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --cxx11-abi)
-      if [ "$2" != "auto" ]; then
-        CXX11_ABI_OVERRIDE="$2"
-      fi
+      case "${2-}" in
+        auto)
+          CXX11_ABI_OVERRIDE=""
+          ;;
+        on|ON|On|true|TRUE|True|1)
+          CXX11_ABI_OVERRIDE=ON
+          ;;
+        off|OFF|Off|false|FALSE|False|0)
+          CXX11_ABI_OVERRIDE=OFF
+          ;;
+        *)
+          echo "Invalid --cxx11-abi value: ${2-} (expected on|off|auto)" >&2
+          exit 1
+          ;;
+      esac
       shift 2
       ;;
     --help)
@@ -123,18 +135,7 @@ echo "Python: ${PYTHON_PATH}"
 # documented default, and let the caller pin the value with --cxx11-abi.
 DEFAULT_CXX11_ABI="${DEFAULT_CXX11_ABI:-OFF}"
 if [ -n "${CXX11_ABI_OVERRIDE:-}" ]; then
-  case "$CXX11_ABI_OVERRIDE" in
-    on|ON|On|true|TRUE|True|1)
-      USE_CXX11_ABI=ON
-      ;;
-    off|OFF|Off|false|FALSE|False|0)
-      USE_CXX11_ABI=OFF
-      ;;
-    *)
-      echo "Invalid --cxx11-abi value: ${CXX11_ABI_OVERRIDE} (expected on|off|auto)" >&2
-      exit 1
-      ;;
-  esac
+  USE_CXX11_ABI=$CXX11_ABI_OVERRIDE
   echo "PyTorch C++ ABI: USE_CXX11_ABI=${USE_CXX11_ABI} (set by --cxx11-abi)"
 elif TORCH_CXX11_ABI=$("${PYTHON_PATH}" -c 'import torch; print(torch.compiled_with_cxx11_abi())' 2>/dev/null); then
   case "$TORCH_CXX11_ABI" in

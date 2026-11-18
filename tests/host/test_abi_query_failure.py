@@ -57,3 +57,13 @@ def test_invalid_override_is_rejected(tmp_path):
     assert result.returncode != 0
     assert not marker.exists()
     assert "Invalid --cxx11-abi value" in result.stderr
+
+
+def test_auto_after_override_uses_probe(tmp_path):
+    result, arguments, marker, _, _ = run_build(
+        tmp_path, abi="False",
+        extra_args=("--cxx11-abi", "on", "--cxx11-abi", "auto"),
+    )
+    assert result.returncode == 0
+    assert marker.exists()
+    assert "-DUSE_CXX11_ABI=OFF" in json.loads(arguments.read_text())
